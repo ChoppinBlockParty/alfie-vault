@@ -1,0 +1,5 @@
+alfie-vault
+tests/test_vault
+*.o
+vault/
+*.deb
