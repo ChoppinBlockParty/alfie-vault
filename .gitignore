@@ -2,6 +2,7 @@ alfie-vault
 tests/test_vault
 tests/test_ipc_crypto
 tests/test_ipc_transport
+tests/test_http_unlock
 *.o
 vault/
 *.deb

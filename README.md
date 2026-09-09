@@ -56,6 +56,18 @@ Vault-to-browser-worker handoff uses two layers:
 
 See `docs/encrypted-ipc.md`.
 
+## HTTP unlock server
+
+Simple local HTTP unlock server is implemented:
+
+```bash
+./alfie-vault serve-unlock ./vault slava 127.0.0.1 18080 account example.com slava@example.com fill_password
+```
+
+It creates a one-time `/unlock/<token>` page. The page accepts login + vault password, unlocks one chunk, never displays the final secret, then consumes the token.
+
+See `docs/http-unlock-server.md`.
+
 ## Current CLI
 
 ```bash
@@ -63,4 +75,4 @@ See `docs/encrypted-ipc.md`.
 ./alfie-vault get-account ./vault example.com slava@example.com passphrase
 ```
 
-Next step: replace passphrase CLI args with HTTPS short-lived unlock server before real use. The CLI is smoke-test only because argv is visible to the OS.
+Next step: put TLS/reverse proxy in front of the HTTP unlock server and wire successful unlocks into encrypted Unix-socket browser-worker delivery. The CLI is smoke-test only because argv is visible to the OS.

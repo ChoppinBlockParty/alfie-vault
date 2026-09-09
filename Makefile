@@ -2,10 +2,10 @@ CXX ?= g++
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -Wpedantic -Ithird_party/libssl-dev/usr/include -Ithird_party/libssl-dev/usr/include/x86_64-linux-gnu -Ithird_party/argon2/usr/include
 LDFLAGS := -Lthird_party/argon2/usr/lib/x86_64-linux-gnu -Wl,-rpath,$(CURDIR)/third_party/argon2/usr/lib/x86_64-linux-gnu -largon2 -l:libcrypto.so.3
 
-all: alfie-vault tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport
+all: alfie-vault tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport tests/test_http_unlock
 
-alfie-vault: src/main.cpp src/vault.cpp src/vault.hpp
-	$(CXX) $(CXXFLAGS) src/main.cpp src/vault.cpp -o $@ $(LDFLAGS)
+alfie-vault: src/main.cpp src/vault.cpp src/vault.hpp src/http_unlock.cpp src/http_unlock.hpp
+	$(CXX) $(CXXFLAGS) src/main.cpp src/vault.cpp src/http_unlock.cpp -o $@ $(LDFLAGS)
 
 tests/test_vault: tests/test_vault.cpp src/vault.cpp src/vault.hpp
 	$(CXX) $(CXXFLAGS) tests/test_vault.cpp src/vault.cpp -o tests/test_vault $(LDFLAGS)
@@ -16,12 +16,16 @@ tests/test_ipc_crypto: tests/test_ipc_crypto.cpp src/ipc_crypto.cpp src/ipc_cryp
 tests/test_ipc_transport: tests/test_ipc_transport.cpp src/ipc_transport.cpp src/ipc_transport.hpp
 	$(CXX) $(CXXFLAGS) tests/test_ipc_transport.cpp src/ipc_transport.cpp -o tests/test_ipc_transport $(LDFLAGS)
 
-test: tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport
+tests/test_http_unlock: tests/test_http_unlock.cpp src/http_unlock.cpp src/http_unlock.hpp src/vault.cpp src/vault.hpp
+	$(CXX) $(CXXFLAGS) tests/test_http_unlock.cpp src/http_unlock.cpp src/vault.cpp -o tests/test_http_unlock $(LDFLAGS)
+
+test: tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport tests/test_http_unlock
 	./tests/test_vault
 	./tests/test_ipc_crypto
 	./tests/test_ipc_transport
+	./tests/test_http_unlock
 
 clean:
-	rm -f alfie-vault tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport
+	rm -f alfie-vault tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport tests/test_http_unlock
 
 .PHONY: all test clean
