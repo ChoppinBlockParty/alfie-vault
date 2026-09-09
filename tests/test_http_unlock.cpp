@@ -46,6 +46,31 @@ static void test_submit_unlocks_once_without_returning_secret() {
     std::filesystem::remove_all(dir);
 }
 
+static void test_store_token_adds_new_secret_without_echoing_value() {
+    auto dir = std::filesystem::temp_directory_path() / "alfie_http_store_secret";
+    std::filesystem::remove_all(dir);
+    UnlockService service(dir, "slava");
+    auto token = service.create_store_token({"account", "new.example", "new-login", "store_secret"});
+
+    auto form = service.handle({"GET", "/store/" + token, "", {}});
+    assert(form.status == 200);
+    assert(form.body.find("textarea") != std::string::npos);
+    assert(form.body.find("name=\"value\"") != std::string::npos);
+
+    std::string body = "login=slava&password=master+pass&value=%7B%22secret%22%3A%22NEW-SECRET-HTTP%22%7D";
+    auto response = service.handle({"POST", "/store/" + token, body, {{"content-type", "application/x-www-form-urlencoded"}}});
+    assert(response.status == 200);
+    assert(response.body.find("Stored") != std::string::npos);
+    assert(response.body.find("NEW-SECRET-HTTP") == std::string::npos);
+
+    ChunkVault vault(dir);
+    assert(vault.get("account", "new.example", "new-login", "master pass") == R"({"secret":"NEW-SECRET-HTTP"})");
+
+    auto replay = service.handle({"POST", "/store/" + token, body, {{"content-type", "application/x-www-form-urlencoded"}}});
+    assert(replay.status == 410);
+    std::filesystem::remove_all(dir);
+}
+
 static void test_bad_login_does_not_consume_token() {
     auto dir = std::filesystem::temp_directory_path() / "alfie_http_unlock_bad_login";
     prepare_vault(dir);
@@ -74,6 +99,7 @@ static void test_http_parse_and_render() {
 int main() {
     test_token_form_does_not_expose_secret();
     test_submit_unlocks_once_without_returning_secret();
+    test_store_token_adds_new_secret_without_echoing_value();
     test_bad_login_does_not_consume_token();
     test_http_parse_and_render();
     std::cout << "HTTP unlock tests passed\n";

@@ -66,7 +66,19 @@ Simple local HTTP unlock server is implemented:
 
 It creates a one-time `/unlock/<token>` page. The page accepts login + vault password, unlocks one chunk, never displays the final secret, then consumes the token.
 
+It can also create a one-time `/store/<token>` page for adding new secrets without Telegram:
+
+```bash
+./alfie-vault serve-store ./vault slava 127.0.0.1 18080 account example.com slava@example.com store_secret
+```
+
+The store page accepts login + vault password + secret JSON, encrypts the new chunk, and never echoes the secret.
+
 See `docs/http-unlock-server.md`.
+
+## C++ style
+
+Use Make as the main build system. C++ formatting/tidying is configured with `.clang-format` and `.clang-tidy`; see `docs/cpp-style.md`.
 
 ## Current CLI
 

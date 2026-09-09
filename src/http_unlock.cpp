@@ -102,10 +102,9 @@ std::string status_text(int status) {
     }
 }
 
-std::string token_from_target(const std::string& target) {
-    constexpr const char* prefix = "/unlock/";
+std::string token_from_target(const std::string& target, const std::string& prefix) {
     if (target.rfind(prefix, 0) != 0) return {};
-    auto token = target.substr(std::char_traits<char>::length(prefix));
+    auto token = target.substr(prefix.size());
     auto q = token.find('?');
     if (q != std::string::npos) token.resize(q);
     return token;
@@ -121,35 +120,53 @@ std::string UnlockService::create_token(const UnlockRequestSpec& spec) {
     return token;
 }
 
+std::string UnlockService::create_store_token(const UnlockRequestSpec& spec) {
+    std::string token = random_token();
+    tokens_[token] = TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, true};
+    return token;
+}
+
 HttpResponse UnlockService::handle(const HttpRequest& request) {
-    std::string token = token_from_target(request.target);
+    std::string token = token_from_target(request.target, "/unlock/");
+    bool store_mode = false;
+    if (token.empty()) {
+        token = token_from_target(request.target, "/store/");
+        store_mode = true;
+    }
     if (token.empty()) return {404, "text/plain; charset=utf-8", "Not found"};
-    if (request.method == "GET") return render_form(token);
-    if (request.method == "POST") return handle_submit(token, request.body);
+    if (request.method == "GET") return render_form(token, store_mode);
+    if (request.method == "POST") return handle_submit(token, request.body, store_mode);
     return {405, "text/plain; charset=utf-8", "Method not allowed"};
 }
 
-HttpResponse UnlockService::render_form(const std::string& token) {
+HttpResponse UnlockService::render_form(const std::string& token, bool store_mode) {
     auto it = tokens_.find(token);
-    if (it == tokens_.end() || it->second.used || std::chrono::steady_clock::now() > it->second.expires_at) {
+    if (it == tokens_.end() || it->second.used || it->second.store_mode != store_mode ||
+        std::chrono::steady_clock::now() > it->second.expires_at) {
         return {410, "text/plain; charset=utf-8", "Unlock link expired"};
     }
     const auto& spec = it->second.spec;
-    std::string body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Alfie Vault Unlock</title></head>"
-                       "<body><h1>Alfie Vault Unlock</h1>"
+    std::string title = store_mode ? "Alfie Vault Store" : "Alfie Vault Unlock";
+    std::string action_path = store_mode ? "/store/" : "/unlock/";
+    std::string value_field = store_mode ? "<label>Secret JSON <textarea name=\"value\" autocomplete=\"off\"></textarea></label><br>" : "";
+    std::string button = store_mode ? "Store once" : "Unlock once";
+    std::string body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + title + "</title></head>"
+                       "<body><h1>" + title + "</h1>"
                        "<p>Domain: " + html_escape(spec.domain) + "</p>"
                        "<p>Action: " + html_escape(spec.action) + "</p>"
-                       "<form method=\"post\" action=\"/unlock/" + html_escape(token) + "\">"
+                       "<form method=\"post\" action=\"" + action_path + html_escape(token) + "\">"
                        "<label>Login <input name=\"login\" autocomplete=\"username\"></label><br>"
                        "<label>Vault password <input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label><br>"
-                       "<button type=\"submit\">Unlock once</button>"
+                       + value_field +
+                       "<button type=\"submit\">" + button + "</button>"
                        "</form></body></html>";
     return {200, "text/html; charset=utf-8", body};
 }
 
-HttpResponse UnlockService::handle_submit(const std::string& token, const std::string& form_body) {
+HttpResponse UnlockService::handle_submit(const std::string& token, const std::string& form_body, bool store_mode) {
     auto it = tokens_.find(token);
-    if (it == tokens_.end() || it->second.used || std::chrono::steady_clock::now() > it->second.expires_at) {
+    if (it == tokens_.end() || it->second.used || it->second.store_mode != store_mode ||
+        std::chrono::steady_clock::now() > it->second.expires_at) {
         return {410, "text/plain; charset=utf-8", "Unlock link expired"};
     }
     auto fields = parse_form(form_body);
@@ -161,14 +178,23 @@ HttpResponse UnlockService::handle_submit(const std::string& token, const std::s
     const auto spec = it->second.spec;
     try {
         ChunkVault vault(vault_dir_);
-        vault.use(spec.purpose, spec.domain, spec.account, password->second, [&](const SecureBuffer& secret) {
-            // Real browser-worker delivery will use encrypted IPC. Until that integration,
-            // store only metadata proving that one secret was unlocked; never store payload.
-            last_delivery_ = DeliveredSecret{token, spec.domain, spec.account, spec.action, secret.size()};
-        });
+        if (store_mode) {
+            auto value = fields.find("value");
+            if (value == fields.end() || value->second.empty()) return {400, "text/plain; charset=utf-8", "Missing secret value"};
+            SecureBuffer secret_value(value->second);
+            vault.put(spec.purpose, spec.domain, spec.account, password->second, secret_value.str());
+            last_delivery_ = DeliveredSecret{token, spec.domain, spec.account, spec.action, secret_value.size()};
+            value->second.assign(value->second.size(), '\0');
+        } else {
+            vault.use(spec.purpose, spec.domain, spec.account, password->second, [&](const SecureBuffer& secret) {
+                // Real browser-worker delivery will use encrypted IPC. Until that integration,
+                // store only metadata proving that one secret was unlocked; never store payload.
+                last_delivery_ = DeliveredSecret{token, spec.domain, spec.account, spec.action, secret.size()};
+            });
+        }
         it->second.used = true;
         password->second.assign(password->second.size(), '\0');
-        return {200, "text/html; charset=utf-8", "<html><body>Unlocked. Credential delivered to local worker.</body></html>"};
+        return {200, "text/html; charset=utf-8", store_mode ? "<html><body>Stored.</body></html>" : "<html><body>Unlocked. Credential delivered to local worker.</body></html>"};
     } catch (const std::exception&) {
         password->second.assign(password->second.size(), '\0');
         return {403, "text/plain; charset=utf-8", "Unlock failed"};

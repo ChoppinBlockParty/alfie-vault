@@ -20,6 +20,22 @@ http://127.0.0.1:18080/unlock/<token>
 7. The final website password/card value is not shown in the page.
 8. The token is consumed and cannot be reused.
 
+## Store a new secret via web link
+
+For secrets that should not go through Telegram, Alfie creates a one-time store link:
+
+```bash
+./alfie-vault serve-store ./vault slava 127.0.0.1 18080 account example.com slava@example.com store_secret
+```
+
+The page asks for:
+
+- vault login
+- vault master password
+- secret JSON value
+
+After submit, the server encrypts the value into the vault chunk and returns only `Stored`; it does not echo the secret.
+
 ## Current command
 
 ```bash
