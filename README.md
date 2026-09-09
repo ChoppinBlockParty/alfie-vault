@@ -47,6 +47,15 @@ The first write creates `vault.meta` with:
 
 The salt is not secret. It makes two vaults with the same master password derive different keys and record IDs.
 
+## Encrypted IPC
+
+Vault-to-browser-worker handoff uses two layers:
+
+- private Unix domain socket: `0700` runtime dir, `0600` socket, peer UID checked with `SO_PEERCRED`
+- encrypted payload: ephemeral X25519, HKDF-SHA256, AES-256-GCM, token/domain/action bound as AAD, nonce replay rejection
+
+See `docs/encrypted-ipc.md`.
+
 ## Current CLI
 
 ```bash

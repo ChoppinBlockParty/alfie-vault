@@ -2,7 +2,7 @@ CXX ?= g++
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -Wpedantic -Ithird_party/libssl-dev/usr/include -Ithird_party/libssl-dev/usr/include/x86_64-linux-gnu -Ithird_party/argon2/usr/include
 LDFLAGS := -Lthird_party/argon2/usr/lib/x86_64-linux-gnu -Wl,-rpath,$(CURDIR)/third_party/argon2/usr/lib/x86_64-linux-gnu -largon2 -l:libcrypto.so.3
 
-all: alfie-vault tests/test_vault
+all: alfie-vault tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport
 
 alfie-vault: src/main.cpp src/vault.cpp src/vault.hpp
 	$(CXX) $(CXXFLAGS) src/main.cpp src/vault.cpp -o $@ $(LDFLAGS)
@@ -10,10 +10,18 @@ alfie-vault: src/main.cpp src/vault.cpp src/vault.hpp
 tests/test_vault: tests/test_vault.cpp src/vault.cpp src/vault.hpp
 	$(CXX) $(CXXFLAGS) tests/test_vault.cpp src/vault.cpp -o tests/test_vault $(LDFLAGS)
 
-test: tests/test_vault
+tests/test_ipc_crypto: tests/test_ipc_crypto.cpp src/ipc_crypto.cpp src/ipc_crypto.hpp src/vault.cpp src/vault.hpp
+	$(CXX) $(CXXFLAGS) tests/test_ipc_crypto.cpp src/ipc_crypto.cpp src/vault.cpp -o tests/test_ipc_crypto $(LDFLAGS)
+
+tests/test_ipc_transport: tests/test_ipc_transport.cpp src/ipc_transport.cpp src/ipc_transport.hpp
+	$(CXX) $(CXXFLAGS) tests/test_ipc_transport.cpp src/ipc_transport.cpp -o tests/test_ipc_transport $(LDFLAGS)
+
+test: tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport
 	./tests/test_vault
+	./tests/test_ipc_crypto
+	./tests/test_ipc_transport
 
 clean:
-	rm -f alfie-vault tests/test_vault
+	rm -f alfie-vault tests/test_vault tests/test_ipc_crypto tests/test_ipc_transport
 
 .PHONY: all test clean

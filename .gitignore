@@ -1,5 +1,7 @@
 alfie-vault
 tests/test_vault
+tests/test_ipc_crypto
+tests/test_ipc_transport
 *.o
 vault/
 *.deb
