@@ -14,6 +14,14 @@ static std::string read_file(const std::filesystem::path& p) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
+static std::filesystem::path first_record_path(const std::filesystem::path& dir) {
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(dir / "records")) {
+        if (entry.path().extension() == ".enc") return entry.path();
+    }
+    assert(false && "expected encrypted record");
+    return {};
+}
+
 static void test_secure_buffer_wipes() {
     SecureBuffer buf("SECRET");
     assert(buf.str() == "SECRET");
@@ -82,6 +90,31 @@ static void test_wrong_passphrase_fails() {
     std::filesystem::remove_all(dir);
 }
 
+static void test_new_vaults_use_different_random_salts() {
+    auto base = std::filesystem::temp_directory_path();
+    auto a = base / "alfie_vault_cpp_salt_a";
+    auto b = base / "alfie_vault_cpp_salt_b";
+    std::filesystem::remove_all(a);
+    std::filesystem::remove_all(b);
+
+    ChunkVault vault_a(a);
+    ChunkVault vault_b(b);
+    std::string passphrase = "same passphrase";
+    std::string json = R"({"secret":"same"})";
+    vault_a.put("account", "example.com", "u", passphrase, json);
+    vault_b.put("account", "example.com", "u", passphrase, json);
+
+    assert(std::filesystem::exists(a / "vault.meta"));
+    assert(std::filesystem::exists(b / "vault.meta"));
+    assert(read_file(a / "vault.meta") != read_file(b / "vault.meta"));
+    assert(first_record_path(a).filename() != first_record_path(b).filename());
+    assert(vault_a.get("account", "example.com", "u", passphrase) == json);
+    assert(vault_b.get("account", "example.com", "u", passphrase) == json);
+
+    std::filesystem::remove_all(a);
+    std::filesystem::remove_all(b);
+}
+
 static void test_record_can_be_used_without_returning_secret_string() {
     std::filesystem::path dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_use_record";
     std::filesystem::remove_all(dir);
@@ -104,6 +137,7 @@ int main() {
     test_argon2id_derivation_wipes_passphrase_buffer();
     test_record_id_is_stable_and_not_plaintext();
     test_put_get_one_chunk_without_plaintext_on_disk();
+    test_new_vaults_use_different_random_salts();
     test_record_can_be_used_without_returning_secret_string();
     test_wrong_passphrase_fails();
     std::cout << "C++ vault tests passed\n";

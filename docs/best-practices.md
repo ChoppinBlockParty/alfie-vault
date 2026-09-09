@@ -26,13 +26,12 @@ Already good:
 
 Must improve next:
 
-1. Replace deterministic Argon2id salt with a random vault salt stored in vault metadata.
-2. Replace `std::string` passphrase and plaintext APIs with `SecureBuffer`-first APIs.
-3. Initialize OpenSSL secure heap at process start and use secure allocations where practical.
-4. Add runtime checks that fail closed if memory locking/secure heap fails in strict mode.
-5. Disable core dumps for the process with `setrlimit(RLIMIT_CORE, 0)`.
-6. Remove production CLI secret arguments; keep CLI only for test fixtures.
-7. Add a fuzz/corruption test for encrypted chunks and authentication tag failures.
+1. Replace `std::string` passphrase and plaintext APIs with `SecureBuffer`-first APIs.
+2. Initialize OpenSSL secure heap at process start and use secure allocations where practical.
+3. Add runtime checks that fail closed if memory locking/secure heap fails in strict mode.
+4. Disable core dumps for the process with `setrlimit(RLIMIT_CORE, 0)`.
+5. Remove production CLI secret arguments; keep CLI only for test fixtures.
+6. Add a fuzz/corruption test for encrypted chunks and authentication tag failures.
 
 ## Sources
 

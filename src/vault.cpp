@@ -22,6 +22,7 @@ namespace alfie {
 namespace {
 constexpr const char* kMagic = "ALFIECHUNK1\n";
 constexpr size_t kSaltLen = 16;
+constexpr size_t kVaultSaltLen = 32;
 constexpr size_t kNonceLen = 12;
 constexpr size_t kTagLen = 16;
 constexpr size_t kDerivedLen = 64;
@@ -36,6 +37,23 @@ std::vector<unsigned char> sha256_bytes(const std::string& s) {
     std::vector<unsigned char> digest(SHA256_DIGEST_LENGTH);
     SHA256(reinterpret_cast<const unsigned char*>(s.data()), s.size(), digest.data());
     return digest;
+}
+
+unsigned char from_hex(char c) {
+    if (c >= '0' && c <= '9') return static_cast<unsigned char>(c - '0');
+    if (c >= 'a' && c <= 'f') return static_cast<unsigned char>(10 + c - 'a');
+    if (c >= 'A' && c <= 'F') return static_cast<unsigned char>(10 + c - 'A');
+    throw CryptoError("bad hex");
+}
+
+std::vector<unsigned char> unhex(const std::string& s) {
+    if (s.size() % 2 != 0) throw CryptoError("bad hex length");
+    std::vector<unsigned char> out;
+    out.reserve(s.size() / 2);
+    for (size_t i = 0; i < s.size(); i += 2) {
+        out.push_back(static_cast<unsigned char>((from_hex(s[i]) << 4) | from_hex(s[i + 1])));
+    }
+    return out;
 }
 
 std::vector<unsigned char> random_bytes(size_t n) {
@@ -142,8 +160,7 @@ void SecureBuffer::wipe() {
     unlock_memory();
 }
 
-VaultKeys derive_keys(SecureBuffer& passphrase, const std::string& context) {
-    auto salt = sha256_bytes("alfie-vault-argon2id:" + context);
+VaultKeys derive_keys(SecureBuffer& passphrase, const std::vector<unsigned char>& salt) {
     std::vector<unsigned char> out(kDerivedLen);
     int rc = argon2id_hash_raw(/*t_cost*/3, /*m_cost KiB*/65536, /*parallelism*/1,
                                passphrase.bytes().data(), passphrase.bytes().size(),
@@ -154,6 +171,11 @@ VaultKeys derive_keys(SecureBuffer& passphrase, const std::string& context) {
     SecureBuffer record(std::vector<unsigned char>(out.begin() + 32, out.end()));
     OPENSSL_cleanse(out.data(), out.size());
     return VaultKeys(std::move(index), std::move(record));
+}
+
+VaultKeys derive_keys(SecureBuffer& passphrase, const std::string& context) {
+    auto salt = sha256_bytes("alfie-vault-argon2id:" + context);
+    return derive_keys(passphrase, salt);
 }
 
 VaultKeys derive_keys(const std::string& passphrase, const std::string& context) {
@@ -189,6 +211,27 @@ std::string record_id(const SecureBuffer& index_key, const std::string& purpose,
 
 ChunkVault::ChunkVault(std::filesystem::path root) : root_(std::move(root)) {}
 
+std::vector<unsigned char> ChunkVault::load_or_create_salt() const {
+    const auto meta_path = root_ / "vault.meta";
+    if (std::filesystem::exists(meta_path)) {
+        std::ifstream in(meta_path, std::ios::binary);
+        std::string magic, salt_hex;
+        std::getline(in, magic);
+        std::getline(in, salt_hex);
+        if (magic != "ALFIEVAULT1") throw CryptoError("bad vault metadata");
+        auto salt = unhex(salt_hex);
+        if (salt.size() != kVaultSaltLen) throw CryptoError("bad vault salt");
+        return salt;
+    }
+
+    auto salt = random_bytes(kVaultSaltLen);
+    std::filesystem::create_directories(root_);
+    std::ofstream out(meta_path, std::ios::binary | std::ios::trunc);
+    out << "ALFIEVAULT1\n" << hex(salt.data(), salt.size()) << "\n"
+        << "argon2id m=65536,t=3,p=1\n";
+    return salt;
+}
+
 std::filesystem::path ChunkVault::path_for_id(const std::string& id) const {
     return root_ / "records" / id.substr(0, 2) / id.substr(2, 2) / (id + ".enc");
 }
@@ -196,7 +239,8 @@ std::filesystem::path ChunkVault::path_for_id(const std::string& id) const {
 std::filesystem::path ChunkVault::put(const std::string& purpose, const std::string& domain_or_url,
                                       const std::string& account, const std::string& passphrase,
                                       const std::string& plaintext_json) {
-    VaultKeys keys = derive_keys(passphrase, "v1");
+    SecureBuffer locked_passphrase(passphrase);
+    VaultKeys keys = derive_keys(locked_passphrase, load_or_create_salt());
     std::string id = record_id(keys.index_key, purpose, domain_or_url, account);
     auto salt = random_bytes(kSaltLen); // stored for future format agility; record key currently derived from Argon2id master.
     auto nonce = random_bytes(kNonceLen);
@@ -225,7 +269,8 @@ std::string ChunkVault::get(const std::string& purpose, const std::string& domai
 void ChunkVault::use(const std::string& purpose, const std::string& domain_or_url,
                      const std::string& account, const std::string& passphrase,
                      const std::function<void(const SecureBuffer&)>& callback) {
-    VaultKeys keys = derive_keys(passphrase, "v1");
+    SecureBuffer locked_passphrase(passphrase);
+    VaultKeys keys = derive_keys(locked_passphrase, load_or_create_salt());
     std::string id = record_id(keys.index_key, purpose, domain_or_url, account);
     auto file = read_file(path_for_id(id));
     const size_t magic_len = std::char_traits<char>::length(kMagic);

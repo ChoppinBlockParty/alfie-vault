@@ -15,7 +15,8 @@ C++ encrypted chunk vault for Alfie credentials and card details.
 - Key derivation: Argon2id.
 - Record encryption: AES-256-GCM.
 - Record IDs: HMAC-SHA256.
-- Random salt and nonce per record.
+- Random 32-byte vault salt in `vault.meta` for Argon2id.
+- Random nonce per record.
 
 ## Memory
 
@@ -35,6 +36,16 @@ make test
 ```
 
 This repo vendors only Debian OpenSSL/Argon2 headers extracted from distro packages; it links to system `libcrypto.so.3` and local `libargon2`.
+
+## Vault metadata
+
+The first write creates `vault.meta` with:
+
+- format marker: `ALFIEVAULT1`
+- random vault salt
+- Argon2id cost parameters
+
+The salt is not secret. It makes two vaults with the same master password derive different keys and record IDs.
 
 ## Current CLI
 

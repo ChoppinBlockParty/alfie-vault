@@ -84,6 +84,7 @@ public:
              const std::function<void(const SecureBuffer&)>& callback);
 
 private:
+    std::vector<unsigned char> load_or_create_salt() const;
     std::filesystem::path path_for_id(const std::string& id) const;
     std::filesystem::path root_;
 };
