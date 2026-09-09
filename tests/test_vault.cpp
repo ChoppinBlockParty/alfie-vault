@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <type_traits>
 
 using namespace alfie;
 
@@ -18,6 +19,21 @@ static void test_secure_buffer_wipes() {
     assert(buf.str() == "SECRET");
     buf.wipe();
     for (auto b : buf.bytes()) assert(b == 0);
+}
+
+static void test_secret_types_are_move_only() {
+    static_assert(!std::is_copy_constructible_v<SecureBuffer>);
+    static_assert(!std::is_copy_assignable_v<SecureBuffer>);
+    static_assert(!std::is_copy_constructible_v<VaultKeys>);
+    static_assert(!std::is_copy_assignable_v<VaultKeys>);
+}
+
+static void test_argon2id_derivation_wipes_passphrase_buffer() {
+    SecureBuffer passphrase("correct horse battery staple");
+    auto keys = derive_keys(passphrase, "wipe-test");
+    assert(keys.index_key.size() == 32);
+    assert(keys.record_key.size() == 32);
+    for (auto b : passphrase.bytes()) assert(b == 0);
 }
 
 static void test_record_id_is_stable_and_not_plaintext() {
@@ -66,10 +82,29 @@ static void test_wrong_passphrase_fails() {
     std::filesystem::remove_all(dir);
 }
 
+static void test_record_can_be_used_without_returning_secret_string() {
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_use_record";
+    std::filesystem::remove_all(dir);
+    ChunkVault vault(dir);
+    vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
+
+    size_t seen_size = 0;
+    vault.use("account", "example.com", "u", "right pass", [&](const SecureBuffer& secret) {
+        seen_size = secret.size();
+        assert(secret.str() == R"({"secret":"s"})");
+    });
+
+    assert(seen_size == 14);
+    std::filesystem::remove_all(dir);
+}
+
 int main() {
     test_secure_buffer_wipes();
+    test_secret_types_are_move_only();
+    test_argon2id_derivation_wipes_passphrase_buffer();
     test_record_id_is_stable_and_not_plaintext();
     test_put_get_one_chunk_without_plaintext_on_disk();
+    test_record_can_be_used_without_returning_secret_string();
     test_wrong_passphrase_fails();
     std::cout << "C++ vault tests passed\n";
 }

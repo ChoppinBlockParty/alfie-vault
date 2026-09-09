@@ -6,7 +6,7 @@ C++ encrypted chunk vault for Alfie credentials and card details.
 
 - Runtime vault is a directory of small encrypted records, not one big decrypted JSON.
 - Record path is derived from `HMAC(index_key, purpose/domain/account)`.
-- Each record is decrypted alone, used, then wiped.
+- Each record is decrypted alone, used through `ChunkVault::use(...)`, then wiped.
 - Export/backup can be a tarball of the encrypted vault directory.
 
 ## Crypto
@@ -20,9 +20,12 @@ C++ encrypted chunk vault for Alfie credentials and card details.
 ## Memory
 
 - Secrets use `SecureBuffer`.
+- `SecureBuffer` and `VaultKeys` are move-only, so secret buffers are not accidentally copied.
 - Best effort `mlock` to avoid swap.
 - Best effort `MADV_DONTDUMP` to avoid core dumps.
 - Wipe uses `OPENSSL_cleanse`.
+- Argon2id passphrase buffers are wiped immediately after key derivation.
+- Prefer `ChunkVault::use(...)`; it keeps decrypted data inside a callback-owned `SecureBuffer` instead of returning a long-lived plaintext `std::string`.
 
 ## Build
 
@@ -40,4 +43,4 @@ This repo vendors only Debian OpenSSL/Argon2 headers extracted from distro packa
 ./alfie-vault get-account ./vault example.com slava@example.com passphrase
 ```
 
-Next step: replace passphrase CLI args with HTTPS short-lived unlock server before real use.
+Next step: replace passphrase CLI args with HTTPS short-lived unlock server before real use. The CLI is smoke-test only because argv is visible to the OS.

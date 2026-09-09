@@ -142,14 +142,23 @@ void SecureBuffer::wipe() {
     unlock_memory();
 }
 
-VaultKeys derive_keys(const std::string& passphrase, const std::string& context) {
+VaultKeys derive_keys(SecureBuffer& passphrase, const std::string& context) {
     auto salt = sha256_bytes("alfie-vault-argon2id:" + context);
     std::vector<unsigned char> out(kDerivedLen);
     int rc = argon2id_hash_raw(/*t_cost*/3, /*m_cost KiB*/65536, /*parallelism*/1,
-                               passphrase.data(), passphrase.size(),
+                               passphrase.bytes().data(), passphrase.bytes().size(),
                                salt.data(), salt.size(), out.data(), out.size());
+    passphrase.wipe();
     if (rc != ARGON2_OK) throw CryptoError(argon2_error_message(rc));
-    return {{out.begin(), out.begin() + 32}, {out.begin() + 32, out.end()}};
+    SecureBuffer index(std::vector<unsigned char>(out.begin(), out.begin() + 32));
+    SecureBuffer record(std::vector<unsigned char>(out.begin() + 32, out.end()));
+    OPENSSL_cleanse(out.data(), out.size());
+    return VaultKeys(std::move(index), std::move(record));
+}
+
+VaultKeys derive_keys(const std::string& passphrase, const std::string& context) {
+    SecureBuffer locked_passphrase(passphrase);
+    return derive_keys(locked_passphrase, context);
 }
 
 std::string normalize_domain(const std::string& input) {
@@ -166,14 +175,16 @@ std::string normalize_domain(const std::string& input) {
     return s;
 }
 
-std::string record_id(const std::vector<unsigned char>& index_key, const std::string& purpose,
+std::string record_id(const SecureBuffer& index_key, const std::string& purpose,
                       const std::string& domain_or_url, const std::string& account) {
     std::string msg = purpose + "\0" + normalize_domain(domain_or_url) + "\0" + account;
     unsigned int len = 0;
     unsigned char mac[EVP_MAX_MD_SIZE];
-    HMAC(EVP_sha256(), index_key.data(), index_key.size(),
+    HMAC(EVP_sha256(), index_key.bytes().data(), index_key.bytes().size(),
          reinterpret_cast<const unsigned char*>(msg.data()), msg.size(), mac, &len);
-    return hex(mac, len);
+    std::string id = hex(mac, len);
+    OPENSSL_cleanse(mac, sizeof(mac));
+    return id;
 }
 
 ChunkVault::ChunkVault(std::filesystem::path root) : root_(std::move(root)) {}
@@ -191,7 +202,7 @@ std::filesystem::path ChunkVault::put(const std::string& purpose, const std::str
     auto nonce = random_bytes(kNonceLen);
     std::vector<unsigned char> aad(kMagic, kMagic + std::char_traits<char>::length(kMagic));
     SecureBuffer plain(plaintext_json);
-    auto enc = encrypt_gcm(keys.record_key, nonce, plain.bytes(), aad);
+    auto enc = encrypt_gcm(keys.record_key.bytes(), nonce, plain.bytes(), aad);
     std::vector<unsigned char> file;
     file.insert(file.end(), kMagic, kMagic + std::char_traits<char>::length(kMagic));
     file.insert(file.end(), salt.begin(), salt.end());
@@ -204,6 +215,16 @@ std::filesystem::path ChunkVault::put(const std::string& purpose, const std::str
 
 std::string ChunkVault::get(const std::string& purpose, const std::string& domain_or_url,
                             const std::string& account, const std::string& passphrase) {
+    std::string value;
+    use(purpose, domain_or_url, account, passphrase, [&](const SecureBuffer& secret) {
+        value = secret.str(); // Compatibility path. Production should prefer use().
+    });
+    return value;
+}
+
+void ChunkVault::use(const std::string& purpose, const std::string& domain_or_url,
+                     const std::string& account, const std::string& passphrase,
+                     const std::function<void(const SecureBuffer&)>& callback) {
     VaultKeys keys = derive_keys(passphrase, "v1");
     std::string id = record_id(keys.index_key, purpose, domain_or_url, account);
     auto file = read_file(path_for_id(id));
@@ -214,9 +235,9 @@ std::string ChunkVault::get(const std::string& purpose, const std::string& domai
     std::vector<unsigned char> nonce(file.begin() + magic_len + kSaltLen, file.begin() + magic_len + kSaltLen + kNonceLen);
     std::vector<unsigned char> enc(file.begin() + magic_len + kSaltLen + kNonceLen, file.end());
     std::vector<unsigned char> aad(kMagic, kMagic + magic_len);
-    auto plain = decrypt_gcm(keys.record_key, nonce, enc, aad);
+    auto plain = decrypt_gcm(keys.record_key.bytes(), nonce, enc, aad);
     SecureBuffer out(std::move(plain));
-    return out.str();
+    callback(out);
 }
 
 } // namespace alfie
