@@ -85,12 +85,14 @@ TLS variants are also implemented:
 Without DNS, generate an IP-address certificate:
 
 ```bash
-./scripts/gen-ip-cert.sh 127.0.0.1 ./certs
+./scripts/gen-local-ca.sh ./certs/ca "Alfie Local CA"
+./scripts/gen-ca-ip-server-cert.sh 127.0.0.1 ./certs/server \
+  ./certs/ca/alfie-local-ca-cert.pem ./certs/ca/alfie-local-ca-key.pem
 ```
 
-It encrypts HTTPS traffic, but browsers trust it only after manual certificate/CA trust.
+It encrypts HTTPS traffic, but browsers trust it only after the CA certificate is installed and trusted.
 
-See `docs/http-unlock-server.md`.
+See `docs/http-unlock-server.md` and `docs/local-ca.md`.
 
 ## C++ style
 

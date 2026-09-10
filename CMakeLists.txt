@@ -60,6 +60,8 @@ add_test(NAME http_unlock COMMAND test_http_unlock)
 
 add_test(NAME https_smoke COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/https_smoke.py $<TARGET_FILE:alfie-vault>)
 add_test(NAME gen_ip_cert COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_ip_cert.py)
+add_test(NAME gen_local_ca COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_local_ca.py)
+add_test(NAME gen_ca_ip_server_cert COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_ca_ip_server_cert.py)
 
 set(CLANG_TOOLS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/clang-tools")
 set(CLANG_ENV "LD_LIBRARY_PATH=${CLANG_TOOLS}/usr/lib/x86_64-linux-gnu")
