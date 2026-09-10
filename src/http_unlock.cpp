@@ -282,26 +282,39 @@ HttpResponse UnlockService::render_form(const std::string& token, bool store_mod
         "autocomplete=\"off\"></textarea></label><br>";
   }
   std::string button = store_mode ? "Store once" : "Unlock once";
-  std::string body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + title +
-                     "</title></head>"
-                     "<body><h1>" +
-                     title +
-                     "</h1>"
-                     "<p>Domain: " +
-                     html_escape(spec.domain) +
-                     "</p>"
-                     "<p>Action: " +
-                     html_escape(spec.action) +
-                     "</p>"
-                     "<form method=\"post\" action=\"" +
-                     action_path + html_escape(token) +
-                     "\">"
-                     "<label>Login <input name=\"login\" autocomplete=\"username\"></label><br>"
-                     "<label>Vault password <input name=\"password\" type=\"password\" "
-                     "autocomplete=\"current-password\"></label><br>" +
-                     value_field + "<button type=\"submit\">" + button +
-                     "</button>"
-                     "</form></body></html>";
+  std::string body =
+      "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
+      "<title>" +
+      title +
+      "</title><style>"
+      ":root{color-scheme:light dark}*{box-sizing:border-box}"
+      "body{margin:0;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe "
+      "UI',Roboto,sans-serif;"
+      "background:#0f172a;color:#e5e7eb;display:flex;align-items:center;justify-content:center;"
+      "padding:24px}"
+      ".card{width:100%;max-width:520px;background:#111827;border:1px solid "
+      "#334155;border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.35)}"
+      "h1{font-size:1.4rem;margin:0 0 16px}.meta{color:#cbd5e1;font-size:.95rem;margin:8px 0}"
+      "label{display:block;margin-top:16px;font-weight:600}"
+      "input,textarea,button{width:100%;font:inherit;border-radius:12px;border:1px solid "
+      "#475569;padding:14px;margin-top:8px}"
+      "input,textarea{background:#020617;color:#f8fafc}textarea{min-height:120px}"
+      "button{background:#2563eb;color:white;border:0;font-weight:700;margin-top:20px;cursor:"
+      "pointer}"
+      ".note{background:#172554;color:#bfdbfe;border-radius:12px;padding:12px;margin-top:16px}"
+      "@media "
+      "(max-width:540px){body{padding:12px;align-items:stretch}.card{border-radius:14px;padding:"
+      "18px}}"
+      "</style></head><body><main class=\"card\"><h1>" +
+      title + "</h1><p class=\"meta\">Domain: " + html_escape(spec.domain) +
+      "</p><p class=\"meta\">Action: " + html_escape(spec.action) +
+      "</p><form method=\"post\" action=\"" + action_path + html_escape(token) +
+      "\"><label>Login <input name=\"login\" autocomplete=\"username\" autocapitalize=\"none\" "
+      "spellcheck=\"false\" inputmode=\"text\"></label>"
+      "<label>Vault password <input name=\"password\" type=\"password\" "
+      "autocomplete=\"current-password\"></label>" +
+      value_field + "<button type=\"submit\">" + button + "</button></form></main></body></html>";
   return {200, "text/html; charset=utf-8", body};
 }
 

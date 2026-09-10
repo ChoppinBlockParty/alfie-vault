@@ -96,6 +96,10 @@ static void test_store_file_token_encrypts_file_and_removes_source() {
 
   auto form = service.handle({"GET", "/store-file/" + token, "", {}});
   assert(form.status == 200);
+  assert(form.body.find("name=\"viewport\"") != std::string::npos);
+  assert(form.body.find("inputmode=\"text\"") != std::string::npos);
+  assert(form.body.find("min-height:100vh") != std::string::npos);
+  assert(form.body.find("font-family") != std::string::npos);
   assert(form.body.find("PRIVATE-CA-KEY-MATERIAL") == std::string::npos);
   assert(form.body.find("No secret value will be shown") != std::string::npos);
 
