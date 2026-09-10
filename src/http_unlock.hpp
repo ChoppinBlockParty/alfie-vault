@@ -46,6 +46,8 @@ class UnlockService {
 
   std::string create_token(const UnlockRequestSpec& spec);
   std::string create_store_token(const UnlockRequestSpec& spec);
+  std::string create_store_file_token(const UnlockRequestSpec& spec,
+                                      std::filesystem::path source_file);
   HttpResponse handle(const HttpRequest& request);
   const std::optional<DeliveredSecret>& last_delivery() const {
     return last_delivery_;
@@ -57,11 +59,13 @@ class UnlockService {
     std::chrono::steady_clock::time_point expires_at;
     bool used = false;
     bool store_mode = false;
+    bool store_file_mode = false;
+    std::filesystem::path source_file;
   };
 
-  HttpResponse render_form(const std::string& token, bool store_mode);
+  HttpResponse render_form(const std::string& token, bool store_mode, bool store_file_mode);
   HttpResponse handle_submit(const std::string& token, const std::string& form_body,
-                             bool store_mode);
+                             bool store_mode, bool store_file_mode);
 
   std::filesystem::path vault_dir_;
   std::string expected_login_;

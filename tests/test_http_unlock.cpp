@@ -1,5 +1,6 @@
 #include <cassert>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -80,6 +81,37 @@ static void test_store_token_adds_new_secret_without_echoing_value() {
   std::filesystem::remove_all(dir);
 }
 
+static void test_store_file_token_encrypts_file_and_removes_source() {
+  auto dir = std::filesystem::temp_directory_path() / "alfie_http_store_file_secret";
+  auto source = std::filesystem::temp_directory_path() / "alfie_ca_key_source.pem";
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove(source);
+  {
+    std::ofstream out(source, std::ios::binary);
+    out << "PRIVATE-CA-KEY-MATERIAL";
+  }
+  UnlockService service(dir, "slava");
+  auto token = service.create_store_file_token(
+      {"secret-file", "alfie.local.ca", "alfie-local-ca-key.pem", "store_ca_key"}, source);
+
+  auto form = service.handle({"GET", "/store-file/" + token, "", {}});
+  assert(form.status == 200);
+  assert(form.body.find("PRIVATE-CA-KEY-MATERIAL") == std::string::npos);
+  assert(form.body.find("No secret value will be shown") != std::string::npos);
+
+  auto response =
+      service.handle({"POST", "/store-file/" + token, "login=slava&password=master+pass", {}});
+  assert(response.status == 200);
+  assert(response.body.find("Stored") != std::string::npos);
+  assert(response.body.find("PRIVATE-CA-KEY-MATERIAL") == std::string::npos);
+  assert(!std::filesystem::exists(source));
+
+  ChunkVault vault(dir);
+  assert(vault.get("secret-file", "alfie.local.ca", "alfie-local-ca-key.pem", "master pass") ==
+         "PRIVATE-CA-KEY-MATERIAL");
+  std::filesystem::remove_all(dir);
+}
+
 static void test_bad_login_does_not_consume_token() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_unlock_bad_login";
   prepare_vault(dir);
@@ -111,6 +143,7 @@ int main() {
   test_token_form_does_not_expose_secret();
   test_submit_unlocks_once_without_returning_secret();
   test_store_token_adds_new_secret_without_echoing_value();
+  test_store_file_token_encrypts_file_and_removes_source();
   test_bad_login_does_not_consume_token();
   test_http_parse_and_render();
   std::cout << "HTTP unlock tests passed\n";

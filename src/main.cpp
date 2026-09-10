@@ -19,7 +19,9 @@ static int usage() {
             << "  alfie-vault serve-unlock-tls <vault-dir> <login> <host> <port> <cert> <key> "
                "<purpose> <domain> <account> <action>\n"
             << "  alfie-vault serve-store-tls <vault-dir> <login> <host> <port> <cert> <key> "
-               "<purpose> <domain> <account> <action>\n";
+               "<purpose> <domain> <account> <action>\n"
+            << "  alfie-vault serve-store-file-tls <vault-dir> <login> <host> <port> <cert> "
+               "<key> <purpose> <domain> <account> <action> <source-file>\n";
   return 2;
 }
 
@@ -82,6 +84,17 @@ int main(int argc, char** argv) {
       UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
       auto token = service.create_store_token(spec);
       std::cout << "store link: https://" << argv[4] << ":" << argv[5] << "/store/" << token << "\n"
+                << std::flush;
+      return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
+    }
+    if (cmd == "serve-store-file-tls") {
+      if (argc != 13)
+        return usage();
+      UnlockService service(argv[2], argv[3]);
+      UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
+      auto token = service.create_store_file_token(spec, argv[12]);
+      std::cout << "store file link: https://" << argv[4] << ":" << argv[5] << "/store-file/"
+                << token << "\n"
                 << std::flush;
       return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
     }

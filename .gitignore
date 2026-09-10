@@ -6,6 +6,8 @@ tests/test_ipc_transport
 tests/test_http_unlock
 *.o
 vault/
+private/
+certs/
 *.deb
 third_party/clang-tools/
 third_party/ninja/

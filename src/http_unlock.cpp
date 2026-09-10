@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -181,6 +182,30 @@ std::string read_http_tls(SSL* ssl) {
   }
   return raw;
 }
+
+std::string read_file_secret(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) {
+    throw CryptoError("source secret file not found");
+  }
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+void wipe_and_remove_file(const std::filesystem::path& path) {
+  std::error_code ec;
+  auto size = std::filesystem::file_size(path, ec);
+  if (!ec) {
+    std::ofstream out(path, std::ios::binary | std::ios::in);
+    std::string zeros(8192, '\0');
+    while (size > 0 && out) {
+      const auto n = std::min<uintmax_t>(size, zeros.size());
+      out.write(zeros.data(), static_cast<std::streamsize>(n));
+      size -= n;
+    }
+    out.flush();
+  }
+  std::filesystem::remove(path, ec);
+}
 }  // namespace
 
 UnlockService::UnlockService(std::filesystem::path vault_dir, std::string expected_login)
@@ -188,44 +213,74 @@ UnlockService::UnlockService(std::filesystem::path vault_dir, std::string expect
 
 std::string UnlockService::create_token(const UnlockRequestSpec& spec) {
   std::string token = random_token();
-  tokens_[token] = TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false};
+  tokens_[token] =
+      TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, false, false, {}};
   return token;
 }
 
 std::string UnlockService::create_store_token(const UnlockRequestSpec& spec) {
   std::string token = random_token();
-  tokens_[token] = TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, true};
+  tokens_[token] =
+      TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, true, false, {}};
+  return token;
+}
+
+std::string UnlockService::create_store_file_token(const UnlockRequestSpec& spec,
+                                                   std::filesystem::path source_file) {
+  std::string token = random_token();
+  tokens_[token] = TokenRecord{
+      spec, std::chrono::steady_clock::now() + spec.ttl, false, true, true, std::move(source_file)};
   return token;
 }
 
 HttpResponse UnlockService::handle(const HttpRequest& request) {
   std::string token = token_from_target(request.target, "/unlock/");
   bool store_mode = false;
+  bool store_file_mode = false;
   if (token.empty()) {
     token = token_from_target(request.target, "/store/");
     store_mode = true;
   }
+  if (token.empty()) {
+    token = token_from_target(request.target, "/store-file/");
+    store_mode = true;
+    store_file_mode = true;
+  }
   if (token.empty())
     return {404, "text/plain; charset=utf-8", "Not found"};
   if (request.method == "GET")
-    return render_form(token, store_mode);
+    return render_form(token, store_mode, store_file_mode);
   if (request.method == "POST")
-    return handle_submit(token, request.body, store_mode);
+    return handle_submit(token, request.body, store_mode, store_file_mode);
   return {405, "text/plain; charset=utf-8", "Method not allowed"};
 }
 
-HttpResponse UnlockService::render_form(const std::string& token, bool store_mode) {
+HttpResponse UnlockService::render_form(const std::string& token, bool store_mode,
+                                        bool store_file_mode) {
   auto it = tokens_.find(token);
   if (it == tokens_.end() || it->second.used || it->second.store_mode != store_mode ||
+      it->second.store_file_mode != store_file_mode ||
       std::chrono::steady_clock::now() > it->second.expires_at) {
     return {410, "text/plain; charset=utf-8", "Unlock link expired"};
   }
   const auto& spec = it->second.spec;
   std::string title = store_mode ? "Alfie Vault Store" : "Alfie Vault Unlock";
-  std::string action_path = store_mode ? "/store/" : "/unlock/";
-  std::string value_field = store_mode ? "<label>Secret JSON <textarea name=\"value\" "
-                                         "autocomplete=\"off\"></textarea></label><br>"
-                                       : "";
+  std::string action_path = "/unlock/";
+  if (store_file_mode) {
+    action_path = "/store-file/";
+  } else if (store_mode) {
+    action_path = "/store/";
+  }
+  std::string value_field;
+  if (store_file_mode) {
+    value_field =
+        "<p>No secret value will be shown. The server will encrypt the prepared file "
+        "after successful unlock, then remove it from disk.</p>";
+  } else if (store_mode) {
+    value_field =
+        "<label>Secret JSON <textarea name=\"value\" "
+        "autocomplete=\"off\"></textarea></label><br>";
+  }
   std::string button = store_mode ? "Store once" : "Unlock once";
   std::string body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>" + title +
                      "</title></head>"
@@ -251,9 +306,10 @@ HttpResponse UnlockService::render_form(const std::string& token, bool store_mod
 }
 
 HttpResponse UnlockService::handle_submit(const std::string& token, const std::string& form_body,
-                                          bool store_mode) {
+                                          bool store_mode, bool store_file_mode) {
   auto it = tokens_.find(token);
   if (it == tokens_.end() || it->second.used || it->second.store_mode != store_mode ||
+      it->second.store_file_mode != store_file_mode ||
       std::chrono::steady_clock::now() > it->second.expires_at) {
     return {410, "text/plain; charset=utf-8", "Unlock link expired"};
   }
@@ -268,7 +324,15 @@ HttpResponse UnlockService::handle_submit(const std::string& token, const std::s
   const auto spec = it->second.spec;
   try {
     ChunkVault vault(vault_dir_);
-    if (store_mode) {
+    if (store_file_mode) {
+      std::string file_secret = read_file_secret(it->second.source_file);
+      SecureBuffer secret_value(file_secret);
+      vault.put(spec.purpose, spec.domain, spec.account, password->second, secret_value.str());
+      last_delivery_ =
+          DeliveredSecret{token, spec.domain, spec.account, spec.action, secret_value.size()};
+      OPENSSL_cleanse(file_secret.data(), file_secret.size());
+      wipe_and_remove_file(it->second.source_file);
+    } else if (store_mode) {
       auto value = fields.find("value");
       if (value == fields.end() || value->second.empty())
         return {400, "text/plain; charset=utf-8", "Missing secret value"};
