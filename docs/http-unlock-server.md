@@ -42,9 +42,18 @@ After submit, the server encrypts the value into the vault chunk and returns onl
 ./alfie-vault serve-unlock ./vault slava 127.0.0.1 18080 account example.com slava@example.com fill_password
 ```
 
+TLS variants:
+
+```bash
+./build/alfie-vault serve-unlock-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com fill_password
+./build/alfie-vault serve-store-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com store_secret
+```
+
 ## Current limitation
 
-This is HTTP-only and local-development only. Production needs TLS/domain or a trusted reverse proxy before exposing it outside localhost.
+Plain HTTP mode is local-development only. Do not expose it outside localhost.
+
+TLS server mode is implemented with OpenSSL and requires a PEM certificate and private key. Production should use a real certificate, e.g. via Caddy/nginx reverse proxy or Let's Encrypt.
 
 The CLI still exists only for smoke testing. Real production secrets must not be passed through argv.
 

@@ -1,7 +1,8 @@
 #pragma once
 
-#include <filesystem>
 #include <sys/types.h>
+
+#include <filesystem>
 
 namespace alfie {
 
@@ -11,4 +12,4 @@ std::filesystem::path make_private_runtime_dir(const std::filesystem::path& dir)
 int bind_secure_unix_socket(const std::filesystem::path& socket_path);
 uid_t peer_uid(int connected_unix_socket_fd);
 
-} // namespace alfie
+}  // namespace alfie

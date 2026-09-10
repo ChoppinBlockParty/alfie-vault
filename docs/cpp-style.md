@@ -1,6 +1,6 @@
 # C++ style
 
-Project build stays on Make.
+Project build uses CMake with Ninja.
 
 Formatting/tidying policy:
 
@@ -14,9 +14,9 @@ Formatting/tidying policy:
 Commands:
 
 ```bash
-make format-check
-make format
-make tidy
+cmake --build build --target format-check
+cmake --build build --target format
+cmake --build build --target tidy
 ```
 
-Current environment note: `clang-format` and `clang-tidy` are not installed on this box yet. The Make targets are ready and fail with a clear install message when the tools are missing.
+Current environment note: `clang-format` and `clang-tidy` are installed locally under `third_party/clang-tools` because this box has no root package-install permission.

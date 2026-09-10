@@ -31,11 +31,12 @@ C++ encrypted chunk vault for Alfie credentials and card details.
 ## Build
 
 ```bash
-make
-make test
+cmake -S . -B build -G Ninja -DCMAKE_MAKE_PROGRAM=$PWD/third_party/ninja/usr/bin/ninja
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-This repo vendors only Debian OpenSSL/Argon2 headers extracted from distro packages; it links to system `libcrypto.so.3` and local `libargon2`.
+This repo uses CMake with Ninja. Local tool packages are extracted under `third_party/` because this box has no root package-install permission. See `docs/build.md`.
 
 ## Vault metadata
 
@@ -74,11 +75,18 @@ It can also create a one-time `/store/<token>` page for adding new secrets witho
 
 The store page accepts login + vault password + secret JSON, encrypts the new chunk, and never echoes the secret.
 
+TLS variants are also implemented:
+
+```bash
+./build/alfie-vault serve-unlock-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com fill_password
+./build/alfie-vault serve-store-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com store_secret
+```
+
 See `docs/http-unlock-server.md`.
 
 ## C++ style
 
-Use Make as the main build system. C++ formatting/tidying is configured with `.clang-format` and `.clang-tidy`; see `docs/cpp-style.md`.
+Use CMake with Ninja as the main build system. C++ formatting/tidying is configured with `.clang-format` and `.clang-tidy`; see `docs/cpp-style.md`.
 
 ## Current CLI
 
@@ -87,4 +95,4 @@ Use Make as the main build system. C++ formatting/tidying is configured with `.c
 ./alfie-vault get-account ./vault example.com slava@example.com passphrase
 ```
 
-Next step: put TLS/reverse proxy in front of the HTTP unlock server and wire successful unlocks into encrypted Unix-socket browser-worker delivery. The CLI is smoke-test only because argv is visible to the OS.
+Next step: wire successful unlocks into encrypted Unix-socket browser-worker delivery. The CLI is smoke-test only because argv is visible to the OS.
