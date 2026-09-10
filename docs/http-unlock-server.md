@@ -55,6 +55,17 @@ Plain HTTP mode is local-development only. Do not expose it outside localhost.
 
 TLS server mode is implemented with OpenSSL and requires a PEM certificate and private key. Production should use a real certificate, e.g. via Caddy/nginx reverse proxy or Let's Encrypt.
 
+If there is no DNS name, generate a self-signed certificate for the server IP address:
+
+```bash
+./scripts/gen-ip-cert.sh 127.0.0.1 ./certs
+./build/alfie-vault serve-unlock-tls ./vault slava 127.0.0.1 18443 \
+  ./certs/alfie-ip-cert.pem ./certs/alfie-ip-key.pem \
+  account example.com slava@example.com fill_password
+```
+
+The certificate includes an IP Subject Alternative Name. Browsers will still warn unless Slava manually trusts this certificate/CA on the device. The connection is encrypted, but identity trust is manual instead of public-CA trusted.
+
 The CLI still exists only for smoke testing. Real production secrets must not be passed through argv.
 
 ## Next integration

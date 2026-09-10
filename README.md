@@ -82,6 +82,14 @@ TLS variants are also implemented:
 ./build/alfie-vault serve-store-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com store_secret
 ```
 
+Without DNS, generate an IP-address certificate:
+
+```bash
+./scripts/gen-ip-cert.sh 127.0.0.1 ./certs
+```
+
+It encrypts HTTPS traffic, but browsers trust it only after manual certificate/CA trust.
+
 See `docs/http-unlock-server.md`.
 
 ## C++ style
