@@ -49,11 +49,11 @@ static void test_argon2id_derivation_wipes_passphrase_buffer() {
 
 static void test_record_id_is_stable_and_not_plaintext() {
   VaultKeys keys = derive_keys("correct horse battery staple", "alfie-v1");
-  auto id1 = record_id(keys.index_key, "account", "https://www.example.com", "slava@example.com");
-  auto id2 = record_id(keys.index_key, "account", "example.com", "slava@example.com");
+  auto id1 = record_id(keys.index_key, "account", "https://www.example.com", "yuki@example.com");
+  auto id2 = record_id(keys.index_key, "account", "example.com", "yuki@example.com");
   assert(id1 == id2);
   assert(id1.find("example") == std::string::npos);
-  assert(id1.find("slava") == std::string::npos);
+  assert(id1.find("yuki") == std::string::npos);
   assert(id1.size() == 64);
 }
 
@@ -63,18 +63,18 @@ static void test_put_get_one_chunk_without_plaintext_on_disk() {
   ChunkVault vault(dir);
   std::string passphrase = "correct horse battery staple";
   std::string json =
-      R"({"login":"slava@example.com","secret":"VERY-SECRET-123!","metadata":{"created_by":"test"}})";
+      R"({"login":"yuki@example.com","secret":"VERY-SECRET-123!","metadata":{"created_by":"test"}})";
 
-  auto path = vault.put("account", "example.com", "slava@example.com", passphrase, json);
+  auto path = vault.put("account", "example.com", "yuki@example.com", passphrase, json);
   assert(std::filesystem::exists(path));
   assert(path.string().find("example") == std::string::npos);
 
   std::string raw = read_file(path);
   assert(raw.find("VERY-SECRET") == std::string::npos);
-  assert(raw.find("slava@example.com") == std::string::npos);
+  assert(raw.find("yuki@example.com") == std::string::npos);
   assert(raw.rfind("ALFIECHUNK1\n", 0) == 0);
 
-  auto out = vault.get("account", "example.com", "slava@example.com", passphrase);
+  auto out = vault.get("account", "example.com", "yuki@example.com", passphrase);
   assert(out == json);
   std::filesystem::remove_all(dir);
 }

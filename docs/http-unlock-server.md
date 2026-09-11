@@ -11,7 +11,7 @@ This is the first simple web unlock layer.
 http://127.0.0.1:18080/unlock/<token>
 ```
 
-3. Slava opens the link and enters:
+3. Yuki opens the link and enters:
    - vault login
    - vault master password
 4. The server checks the login.
@@ -25,7 +25,7 @@ http://127.0.0.1:18080/unlock/<token>
 For secrets that should not go through Telegram, Alfie creates a one-time store link:
 
 ```bash
-./alfie-vault serve-store ./vault slava 127.0.0.1 18080 account example.com slava@example.com store_secret
+./alfie-vault serve-store ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com store_secret
 ```
 
 The page asks for:
@@ -39,14 +39,14 @@ After submit, the server encrypts the value into the vault chunk and returns onl
 ## Current command
 
 ```bash
-./alfie-vault serve-unlock ./vault slava 127.0.0.1 18080 account example.com slava@example.com fill_password
+./alfie-vault serve-unlock ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com fill_password
 ```
 
 TLS variants:
 
 ```bash
-./build/alfie-vault serve-unlock-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com fill_password
-./build/alfie-vault serve-store-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com store_secret
+./build/alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com fill_password
+./build/alfie-vault serve-store-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com store_secret
 ```
 
 ## Current limitation
@@ -61,12 +61,12 @@ If there is no DNS name, generate a local CA and an IP-address server certificat
 ./scripts/gen-local-ca.sh ./certs/ca "Alfie Local CA"
 ./scripts/gen-ca-ip-server-cert.sh 127.0.0.1 ./certs/server \
   ./certs/ca/alfie-local-ca-cert.pem ./certs/ca/alfie-local-ca-key.pem
-./build/alfie-vault serve-unlock-tls ./vault slava 127.0.0.1 18443 \
+./build/alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 \
   ./certs/server/alfie-ip-cert.pem ./certs/server/alfie-ip-key.pem \
-  account example.com slava@example.com fill_password
+  account example.com yuki@example.com fill_password
 ```
 
-The server certificate includes an IP Subject Alternative Name. Browsers will trust it only after Slava installs and trusts `alfie-local-ca-cert.pem` on the device. The connection is encrypted, but identity trust is private/manual instead of public-CA trusted.
+The server certificate includes an IP Subject Alternative Name. Browsers will trust it only after Yuki installs and trusts `alfie-local-ca-cert.pem` on the device. The connection is encrypted, but identity trust is private/manual instead of public-CA trusted.
 
 The CLI still exists only for smoke testing. Real production secrets must not be passed through argv.
 

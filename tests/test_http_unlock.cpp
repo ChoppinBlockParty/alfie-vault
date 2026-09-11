@@ -11,16 +11,16 @@ using namespace alfie;
 static void prepare_vault(const std::filesystem::path& dir) {
   std::filesystem::remove_all(dir);
   ChunkVault vault(dir);
-  vault.put("account", "example.com", "slava@example.com", "master pass",
+  vault.put("account", "example.com", "yuki@example.com", "master pass",
             R"({"secret":"VERY-SECRET-HTTP"})");
 }
 
 static void test_token_form_does_not_expose_secret() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_unlock_form";
   prepare_vault(dir);
-  UnlockService service(dir, "slava");
+  UnlockService service(dir, "yuki");
   auto token =
-      service.create_token({"account", "example.com", "slava@example.com", "fill_password"});
+      service.create_token({"account", "example.com", "yuki@example.com", "fill_password"});
 
   auto response = service.handle({"GET", "/unlock/" + token, "", {}});
   assert(response.status == 200);
@@ -33,11 +33,11 @@ static void test_token_form_does_not_expose_secret() {
 static void test_submit_unlocks_once_without_returning_secret() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_unlock_submit";
   prepare_vault(dir);
-  UnlockService service(dir, "slava");
+  UnlockService service(dir, "yuki");
   auto token =
-      service.create_token({"account", "example.com", "slava@example.com", "fill_password"});
+      service.create_token({"account", "example.com", "yuki@example.com", "fill_password"});
 
-  std::string body = "login=slava&password=master+pass";
+  std::string body = "login=yuki&password=master+pass";
   auto response = service.handle(
       {"POST", "/unlock/" + token, body, {{"content-type", "application/x-www-form-urlencoded"}}});
   assert(response.status == 200);
@@ -55,7 +55,7 @@ static void test_submit_unlocks_once_without_returning_secret() {
 static void test_store_token_adds_new_secret_without_echoing_value() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_store_secret";
   std::filesystem::remove_all(dir);
-  UnlockService service(dir, "slava");
+  UnlockService service(dir, "yuki");
   auto token = service.create_store_token({"account", "new.example", "new-login", "store_secret"});
 
   auto form = service.handle({"GET", "/store/" + token, "", {}});
@@ -64,7 +64,7 @@ static void test_store_token_adds_new_secret_without_echoing_value() {
   assert(form.body.find("name=\"value\"") != std::string::npos);
 
   std::string body =
-      "login=slava&password=master+pass&value=%7B%22secret%22%3A%22NEW-SECRET-HTTP%22%7D";
+      "login=yuki&password=master+pass&value=%7B%22secret%22%3A%22NEW-SECRET-HTTP%22%7D";
   auto response = service.handle(
       {"POST", "/store/" + token, body, {{"content-type", "application/x-www-form-urlencoded"}}});
   assert(response.status == 200);
@@ -90,7 +90,7 @@ static void test_store_file_token_encrypts_file_and_removes_source() {
     std::ofstream out(source, std::ios::binary);
     out << "PRIVATE-CA-KEY-MATERIAL";
   }
-  UnlockService service(dir, "slava");
+  UnlockService service(dir, "yuki");
   auto token = service.create_store_file_token(
       {"secret-file", "alfie.local.ca", "alfie-local-ca-key.pem", "store_ca_key"}, source);
 
@@ -104,7 +104,7 @@ static void test_store_file_token_encrypts_file_and_removes_source() {
   assert(form.body.find("No secret value will be shown") != std::string::npos);
 
   auto response =
-      service.handle({"POST", "/store-file/" + token, "login=slava&password=master+pass", {}});
+      service.handle({"POST", "/store-file/" + token, "login=yuki&password=master+pass", {}});
   assert(response.status == 200);
   assert(response.body.find("Stored") != std::string::npos);
   assert(response.body.find("PRIVATE-CA-KEY-MATERIAL") == std::string::npos);
@@ -119,15 +119,15 @@ static void test_store_file_token_encrypts_file_and_removes_source() {
 static void test_bad_login_does_not_consume_token() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_unlock_bad_login";
   prepare_vault(dir);
-  UnlockService service(dir, "slava");
+  UnlockService service(dir, "yuki");
   auto token =
-      service.create_token({"account", "example.com", "slava@example.com", "fill_password"});
+      service.create_token({"account", "example.com", "yuki@example.com", "fill_password"});
 
   auto bad = service.handle({"POST", "/unlock/" + token, "login=wrong&password=master+pass", {}});
   assert(bad.status == 403);
   assert(!service.last_delivery().has_value());
 
-  auto good = service.handle({"POST", "/unlock/" + token, "login=slava&password=master+pass", {}});
+  auto good = service.handle({"POST", "/unlock/" + token, "login=yuki&password=master+pass", {}});
   assert(good.status == 200);
   std::filesystem::remove_all(dir);
 }

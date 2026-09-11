@@ -62,7 +62,7 @@ See `docs/encrypted-ipc.md`.
 Simple local HTTP unlock server is implemented:
 
 ```bash
-./alfie-vault serve-unlock ./vault slava 127.0.0.1 18080 account example.com slava@example.com fill_password
+./alfie-vault serve-unlock ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com fill_password
 ```
 
 It creates a one-time `/unlock/<token>` page. The page accepts login + vault password, unlocks one chunk, never displays the final secret, then consumes the token.
@@ -70,7 +70,7 @@ It creates a one-time `/unlock/<token>` page. The page accepts login + vault pas
 It can also create a one-time `/store/<token>` page for adding new secrets without Telegram:
 
 ```bash
-./alfie-vault serve-store ./vault slava 127.0.0.1 18080 account example.com slava@example.com store_secret
+./alfie-vault serve-store ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com store_secret
 ```
 
 The store page accepts login + vault password + secret JSON, encrypts the new chunk, and never echoes the secret.
@@ -78,8 +78,8 @@ The store page accepts login + vault password + secret JSON, encrypts the new ch
 TLS variants are also implemented:
 
 ```bash
-./build/alfie-vault serve-unlock-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com fill_password
-./build/alfie-vault serve-store-tls ./vault slava 127.0.0.1 18443 cert.pem key.pem account example.com slava@example.com store_secret
+./build/alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com fill_password
+./build/alfie-vault serve-store-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com store_secret
 ```
 
 Without DNS, generate an IP-address certificate:
@@ -101,8 +101,8 @@ Use CMake with Ninja as the main build system. C++ formatting/tidying is configu
 ## Current CLI
 
 ```bash
-./alfie-vault put-account ./vault example.com slava@example.com passphrase '{"login":"slava@example.com","secret":"..."}'
-./alfie-vault get-account ./vault example.com slava@example.com passphrase
+./alfie-vault put-account ./vault example.com yuki@example.com passphrase '{"login":"yuki@example.com","secret":"..."}'
+./alfie-vault get-account ./vault example.com yuki@example.com passphrase
 ```
 
 Next step: wire successful unlocks into encrypted Unix-socket browser-worker delivery. The CLI is smoke-test only because argv is visible to the OS.

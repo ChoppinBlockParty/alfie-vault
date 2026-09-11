@@ -29,9 +29,9 @@ Outputs:
 Run Alfie TLS with those files:
 
 ```bash
-./build/alfie-vault serve-unlock-tls ./vault slava 0.0.0.0 18443 \
+./build/alfie-vault serve-unlock-tls ./vault yuki 0.0.0.0 18443 \
   ./certs/server/alfie-ip-cert.pem ./certs/server/alfie-ip-key.pem \
-  account example.com slava@example.com fill_password
+  account example.com yuki@example.com fill_password
 ```
 
 Then open:
@@ -51,7 +51,7 @@ Trust the CA certificate, not the server private key. Keep both private keys off
 Preferred flow:
 
 ```bash
-./scripts/start-ca-key-store-link.sh <server-ip> ./vault slava 0.0.0.0 18443 ./private/ca-setup
+./scripts/start-ca-key-store-link.sh <server-ip> ./vault yuki 0.0.0.0 18443 ./private/ca-setup
 ```
 
 It will:
@@ -60,7 +60,7 @@ It will:
 2. generate the IP HTTPS server certificate
 3. print the CA certificate path to install/trust on iPhone/Mac
 4. print a one-time HTTPS `/store-file/<token>` link
-5. after Slava enters vault login + master password, encrypt the CA private key into the vault
+5. after Yuki enters vault login + master password, encrypt the CA private key into the vault
 6. wipe and remove the plaintext CA private key file from disk
 
 The CA certificate is public and can be shared. The CA private key must never be sent in chat.

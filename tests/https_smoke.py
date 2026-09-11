@@ -44,7 +44,7 @@ def main() -> int:
                 "put-account",
                 str(vault),
                 "example.com",
-                "slava@example.com",
+                "yuki@example.com",
                 "test-pass",
                 "[REDACTED]",
             ],
@@ -57,14 +57,14 @@ def main() -> int:
                 str(binary),
                 "serve-unlock-tls",
                 str(vault),
-                "slava",
+                "yuki",
                 "127.0.0.1",
                 "18443",
                 str(cert),
                 str(key),
                 "account",
                 "example.com",
-                "slava@example.com",
+                "yuki@example.com",
                 "fill_password",
             ],
             cwd=repo,
@@ -80,7 +80,7 @@ def main() -> int:
             ctx = ssl._create_unverified_context()
             html = urllib.request.urlopen(url, context=ctx, timeout=5).read().decode()
             assert "<form" in html and "name=\"password\"" in html
-            data = urllib.parse.urlencode({"login": "slava", "password": "test-pass"}).encode()
+            data = urllib.parse.urlencode({"login": "yuki", "password": "test-pass"}).encode()
             request = urllib.request.Request(url, data=data, method="POST")
             body = urllib.request.urlopen(request, context=ctx, timeout=5).read().decode()
             assert "Unlocked" in body
