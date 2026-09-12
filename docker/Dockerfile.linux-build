@@ -1,0 +1,27 @@
+# A Linux build of the vault, for the code that only compiles on Linux:
+# accept4(2), SO_PEERCRED and the MADV_DONTDUMP paths are all inside
+# #ifdef __linux__, so nothing on a macOS workstation ever compiles them.
+#
+# Build the image, then run it with the repository mounted read-only at /src:
+#
+#   docker build -f docker/Dockerfile.linux-build -t alfie-vault-linux .
+#   docker run --rm -v "$PWD:/src:ro" alfie-vault-linux
+#
+# The build tree lives inside the container at /build, so a run leaves the
+# host's build/ directory untouched.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        libssl-dev \
+        libargon2-dev \
+        openssl \
+        python3 \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+CMD ["sh", "-c", "cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build /build && ctest --test-dir /build --output-on-failure"]

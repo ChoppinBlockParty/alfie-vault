@@ -63,7 +63,15 @@ dependencies are vendored under `third_party/` and hardcoded in `CMakeLists.txt`
 - `third_party/ninja/` and `third_party/clang-tools/` are **gitignored**. Build helpers prefer
   those tools when available and otherwise look on PATH.
 
-On other platforms (e.g. macOS/arm64), CMake discovers system OpenSSL and Argon2.
+On other platforms (e.g. macOS/arm64), CMake discovers system OpenSSL and Argon2. The vendored
+branch is selected only on **x86_64** Linux, since those are x86_64 binaries.
+
+**Platform-conditional code needs a Linux build to check it.** `accept4(2)`, `SO_PEERCRED` and
+the `MADV_DONTDUMP` calls live inside `#ifdef __linux__`; a macOS build compiles none of them,
+and neither does clang-tidy, which sees the branch the compiler took. `make linux-test` builds
+and tests the tree in a container (`docker/Dockerfile.linux-build`) and is the only thing here
+that covers that code -- `scripts/check_cpp_style.py` flags stale UpperCamelCase values in
+conditional blocks, but that is a backstop, not a compiler.
 
 ## Architecture
 

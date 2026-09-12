@@ -1,7 +1,7 @@
 NINJA ?= $(if $(wildcard $(CURDIR)/third_party/ninja/usr/bin/ninja),$(CURDIR)/third_party/ninja/usr/bin/ninja,ninja)
 BUILD_DIR := build
 
-.PHONY: configure all test clean format format-check naming-check llvm-check style-check tidy
+.PHONY: configure all test clean format format-check naming-check llvm-check style-check tidy linux-test
 
 configure:
 	cmake -S . -B $(BUILD_DIR) -G Ninja -DCMAKE_MAKE_PROGRAM=$(NINJA)
@@ -29,6 +29,13 @@ style-check: configure
 
 tidy: configure
 	cmake --build $(BUILD_DIR) --target tidy
+
+# Build and test on Linux in a container. The accept4, SO_PEERCRED and
+# MADV_DONTDUMP paths are inside #ifdef __linux__, so a macOS build never
+# compiles them and neither does clang-tidy.
+linux-test:
+	docker build -f docker/Dockerfile.linux-build -t alfie-vault-linux .
+	docker run --rm -v "$(CURDIR):/src:ro" alfie-vault-linux
 
 clean:
 	rm -rf $(BUILD_DIR)

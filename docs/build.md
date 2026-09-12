@@ -36,6 +36,27 @@ To move to a newer Catch2, replace the two files from the release assets of the
 [Catch2 release page](https://github.com/catchorg/Catch2/releases) and rebuild;
 nothing else in the build refers to a version.
 
+## Linux build
+
+`accept4(2)`, `SO_PEERCRED` and the `MADV_DONTDUMP` calls sit inside
+`#ifdef __linux__`. A macOS build never compiles them, and neither does clang-tidy,
+which analyses the same branch the compiler took. That is not a hypothetical gap: a
+rename applied by clang-tidy's fixer once left all five of those sites referring to
+identifiers that no longer existed, and everything on macOS stayed green.
+
+```bash
+make linux-test
+```
+
+builds the image in `docker/Dockerfile.linux-build` (Ubuntu with system OpenSSL and
+Argon2) and runs the configure, build and `ctest` inside it, with the repository
+mounted read-only at `/src` and the build tree at `/build`, so the host's `build/`
+is untouched. Run it before any change that touches platform-conditional code.
+
+The image uses the distribution's OpenSSL and Argon2 rather than the vendored
+`third_party/` copies, which are x86_64 binaries; CMake selects the vendored path
+only on x86_64 Linux.
+
 ## Templates
 
 `templates/*.mustache` are embedded into the binary at build time by

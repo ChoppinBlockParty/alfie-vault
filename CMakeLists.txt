@@ -16,7 +16,11 @@ endif()
 # (no root apt permission there); fall back to system OpenSSL/Argon2 elsewhere.
 set(VENDORED_ARGON2_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/usr/lib/x86_64-linux-gnu")
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "${VENDORED_ARGON2_LIB_DIR}")
+# The vendored libraries are x86_64 binaries, so the architecture is part of
+# the question: on any other Linux they would be picked and then fail to link.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$"
+   AND EXISTS "${VENDORED_ARGON2_LIB_DIR}")
     set(OPENSSL_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libssl-dev/usr/include")
     set(OPENSSL_ARCH_HEADERS "${OPENSSL_HEADERS}/x86_64-linux-gnu")
     set(ARGON2_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/usr/include")
