@@ -24,7 +24,7 @@ static bool lockPages(void *p, size_t bytes) {
   if (p == nullptr || bytes == 0)
     return true;
 #ifdef MADV_DONTDUMP
-  madvise(P, Bytes, MADV_DONTDUMP);
+  madvise(p, bytes, MADV_DONTDUMP);
 #endif
   return mlock(p, bytes) == 0;
 }
@@ -33,7 +33,7 @@ static void unlockPages(void *p, size_t bytes) noexcept {
   if (p == nullptr || bytes == 0)
     return;
 #ifdef MADV_DODUMP
-  madvise(P, Bytes, MADV_DODUMP);
+  madvise(p, bytes, MADV_DODUMP);
 #endif
   munlock(p, bytes);
 }

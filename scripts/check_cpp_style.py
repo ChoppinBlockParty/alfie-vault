@@ -29,6 +29,38 @@ def main():
             errors.append(f"{path.relative_to(root)}: iostream in library source")
         if re.search(r"^\s*namespace alfie\s*\{", text, re.MULTILINE):
             errors.append(f"{path.relative_to(root)}: qualify out-of-line definitions")
+    # Code inside a platform #ifdef is invisible to the compiler and to
+    # clang-tidy on every other platform, so a rename applied by clang-tidy
+    # leaves the inactive branch behind and nothing notices until someone
+    # builds on that platform. Values are lowerCamelCase in this project, so an
+    # UpperCamelCase identifier used as a value inside a conditional block is
+    # almost always a name the rename missed.
+    for path in sorted((root / "src").glob("*.cpp")):
+        depth = 0
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            stripped = line.strip()
+            if re.match(r"^#\s*(if|ifdef|ifndef)\b", stripped):
+                depth += 1
+                continue
+            if re.match(r"^#\s*endif\b", stripped):
+                depth = max(0, depth - 1)
+                continue
+            if depth == 0 or stripped.startswith("//"):
+                continue
+            code = re.sub(r'"(\\.|[^"\\])*"', '""', line)
+            for match in re.finditer(r"\b[A-Z][a-z][A-Za-z0-9]*\b", code):
+                before = code[: match.start()]
+                after = code[match.end() :]
+                if before.rstrip().endswith("::") or after.lstrip().startswith("::"):
+                    continue  # qualified name, e.g. UnlockMode::Init
+                if re.match(r"^\s*[A-Za-z_(&*]", after):
+                    continue  # a type in a declaration, a call, a construction
+                errors.append(
+                    f"{path.relative_to(root)}:{number}: "
+                    f"'{match.group()}' looks like a value the rename missed "
+                    "in a conditional block"
+                )
+
     # Mustache escapes {{value}} but not {{{value}}} or {{&value}}. These
     # templates render the page that collects the vault login and master
     # password, so an unescaped interpolation there is an injection point into

@@ -114,8 +114,8 @@ int alfie::bindSecureUnixSocket(const std::filesystem::path &socketPath) {
 // Authenticate the peer before handing its connection to the caller.
 int alfie::acceptSecureUnixSocket(int listener, uid_t expectedUid) {
 #ifdef __linux__
-  ScopedFd Client(
-      accept4(Listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK));
+  ScopedFd client(
+      accept4(listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK));
 #else
   ScopedFd client(accept(listener, nullptr, nullptr));
 #endif
@@ -142,15 +142,15 @@ uid_t alfie::peerUid(int connectedUnixSocketFd) {
     throw CryptoError("peer must be a connected Unix stream socket");
 #ifdef __linux__
   // Read identity from the kernel rather than trusting client-supplied data.
-  ucred Cred{};
-  socklen_t Len = sizeof(Cred);
-  if (getsockopt(ConnectedUnixSocketFd, SOL_SOCKET, SO_PEERCRED, &Cred, &Len) !=
+  ucred cred{};
+  socklen_t len = sizeof(cred);
+  if (getsockopt(connectedUnixSocketFd, SOL_SOCKET, SO_PEERCRED, &cred, &len) !=
       0) {
     throw sysError("SO_PEERCRED");
   }
-  if (Len != sizeof(Cred))
+  if (len != sizeof(cred))
     throw std::runtime_error("invalid peer credential length");
-  return Cred.uid;
+  return cred.uid;
 #else
   // macOS/BSD have no SO_PEERCRED; getpeereid(3) is the equivalent.
   uid_t uid = 0;

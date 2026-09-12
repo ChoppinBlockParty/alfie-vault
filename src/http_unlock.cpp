@@ -42,7 +42,7 @@ using namespace alfie;
 // accept4(2) is Linux-only; elsewhere fall back to accept(2) + FD_CLOEXEC.
 static int acceptCloexec(int listenFd) {
 #ifdef __linux__
-  return accept4(ListenFd, nullptr, nullptr, SOCK_CLOEXEC);
+  return accept4(listenFd, nullptr, nullptr, SOCK_CLOEXEC);
 #else
   int fd = accept(listenFd, nullptr, nullptr);
   if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
