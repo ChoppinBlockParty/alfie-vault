@@ -1,10 +1,15 @@
+//===----------------------------------------------------------------------===//
+/// \file
+/// Exercise corruption behavior and failure paths.
+//===----------------------------------------------------------------------===//
+
 // Corruption and fuzz coverage for encrypted chunks.
 //
-// The rule under test is simple and absolute: a record that has been altered in any way must
-// fail authentication. It must never decrypt to something other than what was stored, and it
-// must never decrypt to a *different* record's contents.
-#include <unistd.h>
-
+// The rule under test is simple and absolute: a record that has been altered in
+// any way must fail authentication. It must never decrypt to something other
+// than what was stored, and it must never decrypt to a *different* record's
+// contents.
+#include "../src/vault.h"
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
@@ -12,264 +17,274 @@
 #include <iostream>
 #include <random>
 #include <string>
+#include <unistd.h>
 #include <vector>
-
-#include "../src/vault.hpp"
 
 using namespace alfie;
 
-namespace {
+static constexpr size_t MagicLen = 12;
+static constexpr size_t SaltLen = 16;
+static constexpr size_t NonceLen = 12;
 
-constexpr size_t kMagicLen = 12;
-constexpr size_t kSaltLen = 16;
-constexpr size_t kNonceLen = 12;
+static const char *Passphrase = "correct horse battery staple";
+static const char *Payload =
+    R"({"login":"yuki@example.com","secret":"hunter2-hunter2"})";
 
-const char* kPassphrase = "correct horse battery staple";
-const char* kPayload = R"({"login":"yuki@example.com","secret":"hunter2-hunter2"})";
-
-std::filesystem::path temp_dir(const std::string& name) {
-  auto dir = std::filesystem::temp_directory_path() /
-             ("alfie-corruption-" + name + "-" + std::to_string(::getpid()));
-  std::filesystem::remove_all(dir);
-  return dir;
+static std::filesystem::path tempDir(const std::string &Name) {
+  auto Dir = std::filesystem::temp_directory_path() /
+             ("alfie-corruption-" + Name + "-" + std::to_string(::getpid()));
+  std::filesystem::remove_all(Dir);
+  return Dir;
 }
 
-std::filesystem::path only_record(const std::filesystem::path& vault_dir) {
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(vault_dir / "records")) {
-    if (entry.path().extension() == ".enc")
-      return entry.path();
+static std::filesystem::path onlyRecord(const std::filesystem::path &VaultDir) {
+  for (const auto &Entry :
+       std::filesystem::recursive_directory_iterator(VaultDir / "records")) {
+    if (Entry.path().extension() == ".enc")
+      return Entry.path();
   }
   assert(false && "expected exactly one encrypted record");
   return {};
 }
 
-std::vector<unsigned char> read_bytes(const std::filesystem::path& p) {
-  std::ifstream in(p, std::ios::binary);
-  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+static std::vector<unsigned char> readBytes(const std::filesystem::path &P) {
+  std::ifstream In(P, std::ios::binary);
+  return {std::istreambuf_iterator<char>(In), std::istreambuf_iterator<char>()};
 }
 
-void write_bytes(const std::filesystem::path& p, const std::vector<unsigned char>& data) {
-  std::ofstream out(p, std::ios::binary | std::ios::trunc);
-  out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+static void writeBytes(const std::filesystem::path &P,
+                       const std::vector<unsigned char> &Data) {
+  std::ofstream Out(P, std::ios::binary | std::ios::trunc);
+  Out.write(reinterpret_cast<const char *>(Data.data()),
+            static_cast<std::streamsize>(Data.size()));
 }
 
-// One Argon2id derivation for the whole sweep: at 64 MiB / t=3 per call, re-deriving for every
-// corruption case would make this test take minutes.
-VaultSession open_session(const std::filesystem::path& dir) {
-  SecureBuffer passphrase(kPassphrase);
-  return VaultSession::open(dir, "yuki", passphrase);
+// One Argon2id derivation for the whole sweep: at 64 MiB / t=3 per call,
+// re-deriving for every corruption case would make this test take minutes.
+static VaultSession openSession(const std::filesystem::path &Dir) {
+  SecureBuffer Password(Passphrase);
+  return VaultSession::open(Dir, "yuki", Password);
 }
 
 // Returns true when the vault refused the record.
-bool rejected(VaultSession& session, const std::string& account, std::string* recovered = nullptr) {
+static bool rejected(VaultSession &Session, const std::string &Account,
+                     std::string *Recovered = nullptr) {
   try {
-    session.use("account", "example.com", account, [&](const SecureBuffer& secret) {
-      if (recovered != nullptr)
-        *recovered = secret.str();
-    });
+    Session.use("account", "example.com", Account,
+                [&](const SecureBuffer &Secret) {
+                  if (Recovered != nullptr)
+                    *Recovered = Secret.str();
+                });
     return false;
-  } catch (const CryptoError&) {
+  } catch (const CryptoError &) {
     return true;
   }
 }
 
+namespace {
 struct Fixture {
-  std::filesystem::path dir;
-  std::filesystem::path record;
-  std::vector<unsigned char> original;
+  std::filesystem::path Dir;
+  std::filesystem::path Record;
+  std::vector<unsigned char> Original;
 
-  explicit Fixture(const std::string& name) : dir(temp_dir(name)) {
-    init_vault(dir, "yuki", kPassphrase);
-    ChunkVault vault(dir);
-    vault.put("account", "example.com", "u", kPassphrase, kPayload);
-    record = only_record(dir);
-    original = read_bytes(record);
+  explicit Fixture(const std::string &Name) : Dir(tempDir(Name)) {
+    initVault(this->Dir, "yuki", Passphrase);
+    ChunkVault Vault(this->Dir);
+    Vault.put("account", "example.com", "u", Passphrase, Payload);
+    this->Record = onlyRecord(this->Dir);
+    this->Original = readBytes(this->Record);
   }
-  ~Fixture() {
-    std::filesystem::remove_all(dir);
-  }
-  void restore() const {
-    write_bytes(record, original);
-  }
+  ~Fixture() { std::filesystem::remove_all(this->Dir); }
+  void restore() const { writeBytes(this->Record, this->Original); }
 };
+} // namespace
 
-// Every single-byte change anywhere in the record must be caught. This covers the magic, the
-// reserved salt, the nonce, the ciphertext and the GCM tag in one sweep -- under the V2 format
-// all of them are authenticated.
-void test_every_single_byte_corruption_is_rejected() {
-  Fixture fx("single-byte");
-  VaultSession vault = open_session(fx.dir);
-  assert(fx.original.size() > kMagicLen + kSaltLen + kNonceLen);
+// Every single-byte change anywhere in the record must be caught. This covers
+// the magic, the reserved salt, the nonce, the ciphertext and the GCM tag in
+// one sweep -- under the V2 format all of them are authenticated.
+static void testEverySingleByteCorruptionIsRejected() {
+  Fixture Fx("single-byte");
+  VaultSession Vault = openSession(Fx.Dir);
+  assert(Fx.Original.size() > MagicLen + SaltLen + NonceLen);
 
-  for (size_t i = 0; i < fx.original.size(); ++i) {
-    auto mutated = fx.original;
-    mutated[i] = static_cast<unsigned char>(mutated[i] ^ 0x01);
-    write_bytes(fx.record, mutated);
-    std::string recovered;
-    const bool refused = rejected(vault, "u", &recovered);
-    if (!refused) {
-      std::cerr << "byte " << i << " was corrupted but the record still decrypted\n";
+  for (size_t I = 0; I < Fx.Original.size(); ++I) {
+    auto Mutated = Fx.Original;
+    Mutated[I] = static_cast<unsigned char>(Mutated[I] ^ 0x01);
+    writeBytes(Fx.Record, Mutated);
+    std::string Recovered;
+    const bool Refused = rejected(Vault, "u", &Recovered);
+    if (!Refused) {
+      std::cerr << "byte " << I
+                << " was corrupted but the record still decrypted\n";
       assert(false && "corrupted byte accepted");
     }
-    fx.restore();
+    Fx.restore();
   }
   // Sanity: the untouched record still works.
-  std::string recovered;
-  assert(!rejected(vault, "u", &recovered));
-  assert(recovered == kPayload);
+  std::string Recovered;
+  assert(!rejected(Vault, "u", &Recovered));
+  assert(Recovered == Payload);
 }
 
-// Every bit of the GCM tag specifically -- the authenticator is the last line of defence.
-void test_every_tag_bit_flip_is_rejected() {
-  Fixture fx("tag-bits");
-  VaultSession vault = open_session(fx.dir);
-  const size_t tag_start = fx.original.size() - 16;
+// Every bit of the GCM tag specifically -- the authenticator is the last line
+// of defence.
+static void testEveryTagBitFlipIsRejected() {
+  Fixture Fx("tag-bits");
+  VaultSession Vault = openSession(Fx.Dir);
+  const size_t TagStart = Fx.Original.size() - 16;
 
-  for (size_t byte = tag_start; byte < fx.original.size(); ++byte) {
-    for (int bit = 0; bit < 8; ++bit) {
-      auto mutated = fx.original;
-      mutated[byte] = static_cast<unsigned char>(mutated[byte] ^ (1u << bit));
-      write_bytes(fx.record, mutated);
-      assert(rejected(vault, "u") && "tag bit flip accepted");
-      fx.restore();
+  for (size_t Byte = TagStart; Byte < Fx.Original.size(); ++Byte) {
+    for (int Bit = 0; Bit < 8; ++Bit) {
+      auto Mutated = Fx.Original;
+      Mutated[Byte] = static_cast<unsigned char>(Mutated[Byte] ^ (1U << Bit));
+      writeBytes(Fx.Record, Mutated);
+      assert(rejected(Vault, "u") && "tag bit flip accepted");
+      Fx.restore();
     }
   }
 }
 
-void test_truncation_at_every_length_is_rejected() {
-  Fixture fx("truncate");
-  VaultSession vault = open_session(fx.dir);
-  for (size_t len = 0; len < fx.original.size(); ++len) {
-    write_bytes(fx.record, {fx.original.begin(), fx.original.begin() + static_cast<long>(len)});
-    assert(rejected(vault, "u") && "truncated record accepted");
-    fx.restore();
+static void testTruncationAtEveryLengthIsRejected() {
+  Fixture Fx("truncate");
+  VaultSession Vault = openSession(Fx.Dir);
+  for (size_t Len = 0; Len < Fx.Original.size(); ++Len) {
+    writeBytes(Fx.Record, {Fx.Original.begin(),
+                           Fx.Original.begin() + static_cast<long>(Len)});
+    assert(rejected(Vault, "u") && "truncated record accepted");
+    Fx.restore();
   }
 }
 
-void test_appended_bytes_are_rejected() {
-  Fixture fx("append");
-  VaultSession vault = open_session(fx.dir);
-  auto mutated = fx.original;
-  mutated.push_back(0x00);
-  write_bytes(fx.record, mutated);
-  assert(rejected(vault, "u") && "appended byte accepted");
+static void testAppendedBytesAreRejected() {
+  Fixture Fx("append");
+  VaultSession Vault = openSession(Fx.Dir);
+  auto Mutated = Fx.Original;
+  Mutated.push_back(0x00);
+  writeBytes(Fx.Record, Mutated);
+  assert(rejected(Vault, "u") && "appended byte accepted");
 }
 
-void test_empty_and_garbage_records_are_rejected() {
-  Fixture fx("garbage");
-  VaultSession vault = open_session(fx.dir);
+static void testEmptyAndGarbageRecordsAreRejected() {
+  Fixture Fx("garbage");
+  VaultSession Vault = openSession(Fx.Dir);
 
-  write_bytes(fx.record, {});
-  assert(rejected(vault, "u"));
+  writeBytes(Fx.Record, {});
+  assert(rejected(Vault, "u"));
 
-  write_bytes(fx.record, std::vector<unsigned char>(8, 0xFF));
-  assert(rejected(vault, "u"));
+  writeBytes(Fx.Record, std::vector<unsigned char>(8, 0xFF));
+  assert(rejected(Vault, "u"));
 
-  std::vector<unsigned char> wrong_magic = fx.original;
-  wrong_magic[0] = 'X';
-  write_bytes(fx.record, wrong_magic);
-  assert(rejected(vault, "u"));
+  std::vector<unsigned char> WrongMagic = Fx.Original;
+  WrongMagic[0] = 'X';
+  writeBytes(Fx.Record, WrongMagic);
+  assert(rejected(Vault, "u"));
 }
 
-// A record file must only decrypt at its own address. Swapping two record files is the attack
-// available to anyone who can write to the vault directory but does not know the master
-// password -- it would make the vault hand a task the wrong credential.
-void test_records_cannot_be_swapped_between_accounts() {
-  auto dir = temp_dir("swap");
-  init_vault(dir, "yuki", kPassphrase);
+// A record file must only decrypt at its own address. Swapping two record files
+// is the attack available to anyone who can write to the vault directory but
+// does not know the master password -- it would make the vault hand a task the
+// wrong credential.
+static void testRecordsCannotBeSwappedBetweenAccounts() {
+  auto Dir = tempDir("swap");
+  initVault(Dir, "yuki", Passphrase);
   {
-    ChunkVault writer(dir);
-    writer.put("account", "example.com", "alice", kPassphrase, R"({"secret":"alice-secret"})");
-    writer.put("account", "example.com", "bob", kPassphrase, R"({"secret":"bob-secret"})");
+    ChunkVault Writer(Dir);
+    Writer.put("account", "example.com", "alice", Passphrase,
+               R"({"secret":"alice-secret"})");
+    Writer.put("account", "example.com", "bob", Passphrase,
+               R"({"secret":"bob-secret"})");
   }
-  VaultSession vault = open_session(dir);
+  VaultSession Vault = openSession(Dir);
 
-  std::filesystem::path alice_path, bob_path;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(dir / "records")) {
-    if (entry.path().extension() != ".enc")
+  std::filesystem::path AlicePath, BobPath;
+  for (const auto &Entry :
+       std::filesystem::recursive_directory_iterator(Dir / "records")) {
+    if (Entry.path().extension() != ".enc")
       continue;
-    if (alice_path.empty())
-      alice_path = entry.path();
+    if (AlicePath.empty())
+      AlicePath = Entry.path();
     else
-      bob_path = entry.path();
+      BobPath = Entry.path();
   }
-  assert(!alice_path.empty() && !bob_path.empty());
+  assert(!AlicePath.empty() && !BobPath.empty());
 
-  auto a = read_bytes(alice_path);
-  auto b = read_bytes(bob_path);
-  write_bytes(alice_path, b);
-  write_bytes(bob_path, a);
+  auto A = readBytes(AlicePath);
+  auto B = readBytes(BobPath);
+  writeBytes(AlicePath, B);
+  writeBytes(BobPath, A);
 
-  // Both accounts must now fail; neither may silently return the other's secret.
-  std::string recovered_alice, recovered_bob;
-  const bool alice_refused = rejected(vault, "alice", &recovered_alice);
-  const bool bob_refused = rejected(vault, "bob", &recovered_bob);
-  assert(recovered_alice.find("bob-secret") == std::string::npos &&
+  // Both accounts must now fail; neither may silently return the other's
+  // secret.
+  std::string RecoveredAlice, RecoveredBob;
+  const bool AliceRefused = rejected(Vault, "alice", &RecoveredAlice);
+  const bool BobRefused = rejected(Vault, "bob", &RecoveredBob);
+  assert(RecoveredAlice.find("bob-secret") == std::string::npos &&
          "swapped record leaked another account's secret");
-  assert(recovered_bob.find("alice-secret") == std::string::npos &&
+  assert(RecoveredBob.find("alice-secret") == std::string::npos &&
          "swapped record leaked another account's secret");
-  assert(alice_refused && bob_refused && "swapped record files must not authenticate");
+  assert(AliceRefused && BobRefused &&
+         "swapped record files must not authenticate");
 
-  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(Dir);
 }
 
-void test_wrong_passphrase_is_rejected() {
-  Fixture fx("wrong-pass");
-  bool threw = false;
+static void testWrongPassphraseIsRejected() {
+  Fixture Fx("wrong-pass");
+  bool Threw = false;
   try {
-    SecureBuffer wrong("wrong pass");
-    VaultSession session = VaultSession::open(fx.dir, "yuki", wrong);
-    session.use("account", "example.com", "u", [](const SecureBuffer&) {});
-  } catch (const CryptoError&) {
-    threw = true;
+    SecureBuffer Wrong("wrong pass");
+    VaultSession Session = VaultSession::open(Fx.Dir, "yuki", Wrong);
+    Session.use("account", "example.com", "u", [](const SecureBuffer &) {});
+  } catch (const CryptoError &) {
+    Threw = true;
   }
-  assert(threw && "wrong passphrase accepted");
+  assert(Threw && "wrong passphrase accepted");
 }
 
 // Randomized sweep with a fixed seed, so a failure is reproducible.
-void test_random_mutations_never_yield_wrong_plaintext() {
-  Fixture fx("fuzz");
-  VaultSession vault = open_session(fx.dir);
-  std::mt19937 rng(0xA1F1E);
-  std::uniform_int_distribution<size_t> pick(0, fx.original.size() - 1);
-  std::uniform_int_distribution<int> byte_value(0, 255);
-  std::uniform_int_distribution<size_t> mutation_count(1, 4);
+static void testRandomMutationsNeverYieldWrongPlaintext() {
+  Fixture Fx("fuzz");
+  VaultSession Vault = openSession(Fx.Dir);
+  // The constant seed is the point: a failing sweep has to be replayable.
+  // NOLINTNEXTLINE(bugprone-random-generator-seed)
+  std::mt19937 Rng(0xA1F1E);
+  std::uniform_int_distribution<size_t> Pick(0, Fx.Original.size() - 1);
+  std::uniform_int_distribution<int> ByteValue(0, 255);
+  std::uniform_int_distribution<size_t> MutationCount(1, 4);
 
-  for (int iteration = 0; iteration < 400; ++iteration) {
-    auto mutated = fx.original;
-    const size_t mutations = mutation_count(rng);
-    bool changed = false;
-    for (size_t m = 0; m < mutations; ++m) {
-      const size_t index = pick(rng);
-      const auto replacement = static_cast<unsigned char>(byte_value(rng));
-      if (replacement != mutated[index])
-        changed = true;
-      mutated[index] = replacement;
+  for (int Iteration = 0; Iteration < 400; ++Iteration) {
+    auto Mutated = Fx.Original;
+    const size_t Mutations = MutationCount(Rng);
+    bool Changed = false;
+    for (size_t M = 0; M < Mutations; ++M) {
+      const size_t Index = Pick(Rng);
+      const auto Replacement = static_cast<unsigned char>(ByteValue(Rng));
+      if (Replacement != Mutated[Index])
+        Changed = true;
+      Mutated[Index] = Replacement;
     }
-    write_bytes(fx.record, mutated);
+    writeBytes(Fx.Record, Mutated);
 
-    std::string recovered;
-    const bool refused = rejected(vault, "u", &recovered);
-    if (changed) {
-      assert(refused && "mutated record authenticated");
-    } else if (!refused) {
-      assert(recovered == kPayload);
+    std::string Recovered;
+    const bool Refused = rejected(Vault, "u", &Recovered);
+    if (Changed) {
+      assert(Refused && "mutated record authenticated");
+    } else if (!Refused) {
+      assert(Recovered == Payload);
     }
-    fx.restore();
+    Fx.restore();
   }
 }
 
-}  // namespace
-
 int main() {
-  test_every_single_byte_corruption_is_rejected();
-  test_every_tag_bit_flip_is_rejected();
-  test_truncation_at_every_length_is_rejected();
-  test_appended_bytes_are_rejected();
-  test_empty_and_garbage_records_are_rejected();
-  test_records_cannot_be_swapped_between_accounts();
-  test_wrong_passphrase_is_rejected();
-  test_random_mutations_never_yield_wrong_plaintext();
+  testEverySingleByteCorruptionIsRejected();
+  testEveryTagBitFlipIsRejected();
+  testTruncationAtEveryLengthIsRejected();
+  testAppendedBytesAreRejected();
+  testEmptyAndGarbageRecordsAreRejected();
+  testRecordsCannotBeSwappedBetweenAccounts();
+  testWrongPassphraseIsRejected();
+  testRandomMutationsNeverYieldWrongPlaintext();
   std::cout << "corruption tests passed\n";
   return 0;
 }

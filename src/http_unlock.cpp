@@ -1,7 +1,21 @@
-#include "http_unlock.hpp"
+//===----------------------------------------------------------------------===//
+/// \file
+/// Authorize one-record vault operations through one-time HTTPS links.
+//===----------------------------------------------------------------------===//
 
+#include "http_unlock.h"
+#include "ca.h"
+#include "scoped_fd.h"
+#include <algorithm>
 #include <arpa/inet.h>
+#include <cctype>
+#include <cerrno>
+#include <charconv>
+#include <cstring>
 #include <fcntl.h>
+#include <fstream>
+#include <iomanip>
+#include <memory>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/err.h>
@@ -11,912 +25,990 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-#include <algorithm>
-#include <cctype>
-#include <cerrno>
-#include <charconv>
-#include <cstring>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <sys/socket.h>
+#include <unistd.h>
 
-#include "scoped_fd.hpp"
+using namespace alfie;
 
-namespace alfie {
-namespace {
 #ifndef SOCK_CLOEXEC
 #define SOCK_CLOEXEC 0
 #endif
 
 // accept4(2) is Linux-only; elsewhere fall back to accept(2) + FD_CLOEXEC.
-int accept_cloexec(int listen_fd) {
+static int acceptCloexec(int ListenFd) {
 #ifdef __linux__
-  return accept4(listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
+  return accept4(ListenFd, nullptr, nullptr, SOCK_CLOEXEC);
 #else
-  int fd = accept(listen_fd, nullptr, nullptr);
-  if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) != 0) {
-    int saved = errno;
-    close(fd);
-    errno = saved;
+  int Fd = accept(ListenFd, nullptr, nullptr);
+  if (Fd >= 0 && fcntl(Fd, F_SETFD, FD_CLOEXEC) != 0) {
+    int Saved = errno;
+    close(Fd);
+    errno = Saved;
     return -1;
   }
-  return fd;
+  return Fd;
 #endif
 }
 
-std::runtime_error sys_error(const std::string& what) {
-  return std::runtime_error(what + ": " + std::strerror(errno));
+static std::runtime_error sysError(const std::string &What) {
+  return std::runtime_error(What + ": " + std::strerror(errno));
 }
 
-std::string random_token() {
-  unsigned char bytes[32];
-  if (RAND_bytes(bytes, sizeof(bytes)) != 1)
+static std::string randomToken() {
+  unsigned char Bytes[32];
+  if (RAND_bytes(Bytes, sizeof(Bytes)) != 1)
     throw CryptoError("RAND_bytes failed");
-  std::ostringstream out;
-  for (auto b : bytes)
-    out << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
-  OPENSSL_cleanse(bytes, sizeof(bytes));
-  return out.str();
+  std::ostringstream Out;
+  for (auto B : Bytes)
+    Out << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(B);
+  OPENSSL_cleanse(Bytes, sizeof(Bytes));
+  return Out.str();
 }
 
 // Rejection sampling gives each six-digit visual identifier equal probability.
-SecureBuffer random_six_digit_code() {
-  unsigned char bytes[3];
-  unsigned int value;
+static SecureBuffer randomSixDigitCode() {
+  unsigned char Bytes[3];
+  unsigned int Value;
   do {
-    if (RAND_bytes(bytes, sizeof(bytes)) != 1)
+    if (RAND_bytes(Bytes, sizeof(Bytes)) != 1)
       throw CryptoError("request code generation failed");
-    value = (static_cast<unsigned int>(bytes[0]) << 16) |
-            (static_cast<unsigned int>(bytes[1]) << 8) | bytes[2];
-  } while (value >= 16000000);
-  SecureBuffer code(6);
-  for (size_t i = code.size(); i > 0; --i) {
-    code.data()[i - 1] = '0' + value % 10;
-    value /= 10;
+    Value = (static_cast<unsigned int>(Bytes[0]) << 16) |
+            (static_cast<unsigned int>(Bytes[1]) << 8) | Bytes[2];
+  } while (Value >= 16000000);
+  SecureBuffer Code(6);
+  for (size_t I = Code.size(); I > 0; --I) {
+    Code.data()[I - 1] = '0' + (Value % 10);
+    Value /= 10;
   }
-  return code;
+  return Code;
 }
 
-std::string html_escape(const std::string& s) {
-  std::string out;
-  for (char c : s) {
-    switch (c) {
-      case '&':
-        out += "&amp;";
-        break;
-      case '<':
-        out += "&lt;";
-        break;
-      case '>':
-        out += "&gt;";
-        break;
-      case '"':
-        out += "&quot;";
-        break;
-      default:
-        out += c;
-        break;
+static std::string htmlEscape(const std::string &S) {
+  std::string Out;
+  for (char C : S) {
+    switch (C) {
+    case '&':
+      Out += "&amp;";
+      break;
+    case '<':
+      Out += "&lt;";
+      break;
+    case '>':
+      Out += "&gt;";
+      break;
+    case '"':
+      Out += "&quot;";
+      break;
+    default:
+      Out += C;
+      break;
     }
   }
-  return out;
+  return Out;
 }
 
-int hex_value(char c) {
-  if (c >= '0' && c <= '9')
-    return c - '0';
-  if (c >= 'a' && c <= 'f')
-    return 10 + c - 'a';
-  if (c >= 'A' && c <= 'F')
-    return 10 + c - 'A';
+static int hexValue(char C) {
+  if (C >= '0' && C <= '9')
+    return C - '0';
+  if (C >= 'a' && C <= 'f')
+    return 10 + C - 'a';
+  if (C >= 'A' && C <= 'F')
+    return 10 + C - 'A';
   return -1;
 }
 
 // Wipe all decoded fields on every exit, including invalid submissions.
+namespace {
 struct FormFields {
-  std::map<std::string, SecureBuffer> values;
+  std::map<std::string, SecureBuffer> Values;
 };
+} // namespace
 
-// Decode directly into secure storage; views avoid intermediate plaintext strings.
-SecureBuffer url_decode(std::string_view input) {
-  SecureBuffer output(input.size());
-  size_t written = 0;
-  for (size_t i = 0; i < input.size(); ++i) {
-    if (input[i] == '+') {
-      output.data()[written++] = ' ';
-    } else if (input[i] == '%' && i + 2 < input.size() && hex_value(input[i + 1]) >= 0 &&
-               hex_value(input[i + 2]) >= 0) {
-      output.data()[written++] = (hex_value(input[i + 1]) << 4) | hex_value(input[i + 2]);
-      i += 2;
+// Decode directly into secure storage; views avoid intermediate plaintext
+// strings.
+static SecureBuffer urlDecode(std::string_view Input) {
+  SecureBuffer Output(Input.size());
+  size_t Written = 0;
+  for (size_t I = 0; I < Input.size(); ++I) {
+    if (Input[I] == '+') {
+      Output.data()[Written++] = ' ';
+    } else if (Input[I] == '%' && I + 2 < Input.size() &&
+               hexValue(Input[I + 1]) >= 0 && hexValue(Input[I + 2]) >= 0) {
+      Output.data()[Written++] =
+          (hexValue(Input[I + 1]) << 4) | hexValue(Input[I + 2]);
+      I += 2;
     } else {
-      output.data()[written++] = input[i];
+      Output.data()[Written++] = Input[I];
     }
   }
-  output.truncate(written);
-  return output;
+  Output.truncate(Written);
+  return Output;
 }
 
-// Accept only known literal field names; never copy attacker-controlled names into plain strings.
-FormFields parse_form(std::string_view body) {
-  FormFields fields;
-  while (!body.empty()) {
-    auto end = body.find('&');
-    auto part = body.substr(0, end);
-    auto separator = part.find('=');
-    if (separator != std::string_view::npos) {
-      auto name = part.substr(0, separator);
-      if (name == "login" || name == "password" || name == "confirm" || name == "value" ||
-          name == "setup_code")
-        fields.values[std::string(name)] = url_decode(part.substr(separator + 1));
+// Accept only known literal field names; never copy attacker-controlled names
+// into plain strings.
+static FormFields parseForm(std::string_view Body) {
+  FormFields Fields;
+  while (!Body.empty()) {
+    auto End = Body.find('&');
+    auto Part = Body.substr(0, End);
+    auto Separator = Part.find('=');
+    if (Separator != std::string_view::npos) {
+      auto Name = Part.substr(0, Separator);
+      if (Name == "login" || Name == "password" || Name == "confirm" ||
+          Name == "value" || Name == "setup_code")
+        Fields.Values[std::string(Name)] =
+            urlDecode(Part.substr(Separator + 1));
     }
-    if (end == std::string_view::npos)
+    if (End == std::string_view::npos)
       break;
-    body.remove_prefix(end + 1);
+    Body.remove_prefix(End + 1);
   }
-  return fields;
+  return Fields;
 }
 
-std::string status_text(int status) {
-  switch (status) {
-    case 200:
-      return "OK";
-    case 201:
-      return "Created";
-    case 400:
-      return "Bad Request";
-    case 403:
-      return "Forbidden";
-    case 404:
-      return "Not Found";
-    case 405:
-      return "Method Not Allowed";
-    case 410:
-      return "Gone";
-    case 500:
-      return "Internal Server Error";
-    default:
-      return "OK";
+static std::string statusText(int Status) {
+  switch (Status) {
+  case 200:
+    return "OK";
+  case 201:
+    return "Created";
+  case 400:
+    return "Bad Request";
+  case 403:
+    return "Forbidden";
+  case 404:
+    return "Not Found";
+  case 405:
+    return "Method Not Allowed";
+  case 410:
+    return "Gone";
+  case 500:
+    return "Internal Server Error";
+  default:
+    return "OK";
   }
 }
 
-std::string token_from_target(const std::string& target, const std::string& prefix) {
-  if (target.rfind(prefix, 0) != 0)
+static std::string tokenFromTarget(const std::string &Target,
+                                   const std::string &Prefix) {
+  if (Target.rfind(Prefix, 0) != 0)
     return {};
-  auto token = target.substr(prefix.size());
-  auto q = token.find('?');
-  if (q != std::string::npos)
-    token.resize(q);
-  return token;
+  auto Token = Target.substr(Prefix.size());
+  auto Q = Token.find('?');
+  if (Q != std::string::npos)
+    Token.resize(Q);
+  return Token;
 }
 
 using Deadline = std::chrono::steady_clock::time_point;
 
 // Bound connection time and allocation before processing unauthenticated input.
-constexpr auto kConnectionTimeout = std::chrono::seconds(10);
-constexpr size_t kMaxHttpBytes = 1024 * 1024;
-constexpr size_t kMaxHeaderBytes = 16 * 1024;
+static constexpr auto ConnectionTimeout = std::chrono::seconds(10);
+static constexpr size_t MaxHttpBytes = size_t{1024} * 1024;
+static constexpr size_t MaxHeaderBytes = size_t{16} * 1024;
 
-// Reuse an absolute deadline so trickled traffic cannot extend the connection lifetime.
-int remaining_milliseconds(Deadline deadline) {
-  auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                       deadline - std::chrono::steady_clock::now())
+// Reuse an absolute deadline so trickled traffic cannot extend the connection
+// lifetime.
+static int remainingMilliseconds(Deadline Deadline) {
+  auto Remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       Deadline - std::chrono::steady_clock::now())
                        .count();
-  if (remaining <= 0)
+  if (Remaining <= 0)
     throw std::runtime_error("TLS connection deadline exceeded");
-  return static_cast<int>(remaining);
+  return static_cast<int>(Remaining);
 }
 
-// Wait for the direction requested by OpenSSL without blocking past the deadline.
-void wait_for_tls(SSL* ssl, int error, Deadline deadline) {
-  short events = error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
-  pollfd socket{SSL_get_fd(ssl), events, 0};
+// Wait for the direction requested by OpenSSL without blocking past the
+// deadline.
+static void waitForTls(SSL *Ssl, int Error, Deadline Deadline) {
+  short Events = Error == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT;
+  pollfd Socket{SSL_get_fd(Ssl), Events, 0};
   for (;;) {
-    int ready = poll(&socket, 1, remaining_milliseconds(deadline));
-    if (ready < 0 && errno == EINTR)
+    int Ready = poll(&Socket, 1, remainingMilliseconds(Deadline));
+    if (Ready < 0 && errno == EINTR)
       continue;
-    if (ready <= 0 || (socket.revents & (POLLERR | POLLNVAL)))
+    if (Ready <= 0 || (Socket.revents & (POLLERR | POLLNVAL)))
       throw std::runtime_error("TLS socket unavailable");
     return;
   }
 }
 
 // Retry the same TLS operation on WANT_READ/WANT_WRITE, as required by OpenSSL.
-template <typename Operation>
-int tls_io(SSL* ssl, Deadline deadline, Operation operation) {
+template <typename OperationT>
+static int tlsIo(SSL *Ssl, Deadline Deadline, OperationT Operation) {
   for (;;) {
-    remaining_milliseconds(deadline);
-    ERR_clear_error();  // SSL_get_error must see only this operation's errors.
-    int result = operation();
-    if (result > 0)
-      return result;
-    int error = SSL_get_error(ssl, result);
-    if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE)
+    remainingMilliseconds(Deadline);
+    ERR_clear_error(); // SSL_get_error must see only this operation's errors.
+    int Result = Operation();
+    if (Result > 0)
+      return Result;
+    int Error = SSL_get_error(Ssl, Result);
+    if (Error != SSL_ERROR_WANT_READ && Error != SSL_ERROR_WANT_WRITE)
       throw std::runtime_error("TLS connection failed");
-    wait_for_tls(ssl, error, deadline);
+    waitForTls(Ssl, Error, Deadline);
   }
 }
 
-// Suppress only this thread's new SIGPIPE, preserving the caller's signal state.
+// Suppress only this thread's new SIGPIPE, preserving the caller's signal
+// state.
+namespace {
 class BlockSigpipe {
- public:
+public:
   BlockSigpipe() {
-    sigemptyset(&blocked_signals_);
-    sigaddset(&blocked_signals_, SIGPIPE);
-    if (pthread_sigmask(SIG_BLOCK, &blocked_signals_, &previous_mask_) != 0)
+    sigemptyset(&BlockedSignals);
+    sigaddset(&BlockedSignals, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &this->BlockedSignals,
+                        &this->PreviousMask) != 0)
       throw std::runtime_error("block SIGPIPE failed");
-    sigset_t pending;
-    sigpending(&pending);
-    had_pending_sigpipe_ = sigismember(&pending, SIGPIPE);
+    sigset_t Pending;
+    sigpending(&Pending);
+    this->HadPendingSigpipe = sigismember(&Pending, SIGPIPE);
   }
   ~BlockSigpipe() {
-    sigset_t pending;
-    sigpending(&pending);
+    sigset_t Pending;
+    sigpending(&Pending);
     // Consume newly generated SIGPIPE before restoring the caller's mask.
-    if (!had_pending_sigpipe_ && sigismember(&pending, SIGPIPE)) {
-      int signal = 0;
-      sigwait(&blocked_signals_, &signal);
+    if (!this->HadPendingSigpipe && sigismember(&Pending, SIGPIPE)) {
+      int Signal = 0;
+      sigwait(&this->BlockedSignals, &Signal);
     }
-    pthread_sigmask(SIG_SETMASK, &previous_mask_, nullptr);
+    pthread_sigmask(SIG_SETMASK, &this->PreviousMask, nullptr);
   }
 
- private:
-  sigset_t blocked_signals_{}, previous_mask_{};
-  bool had_pending_sigpipe_ = false;
+private:
+  sigset_t BlockedSignals{}, PreviousMask{};
+  bool HadPendingSigpipe = false;
 };
+} // namespace
 
 // Erase request plaintext on both normal and exceptional exits.
+namespace {
 struct WipeString {
-  std::string& value;
-  ~WipeString() {
-    OPENSSL_cleanse(value.data(), value.size());
-  }
+  std::string &Value;
+  ~WipeString() { OPENSSL_cleanse(this->Value.data(), this->Value.size()); }
 };
+} // namespace
 
-// Reject signed, overflowing, or trailing-junk lengths before allocating a body.
-size_t parse_content_length(std::string_view value) {
-  auto first = value.find_first_not_of(" \t");
-  auto last = value.find_last_not_of(" \t");
-  if (first == std::string_view::npos)
+// Reject signed, overflowing, or trailing-junk lengths before allocating a
+// body.
+static size_t parseContentLength(std::string_view Value) {
+  auto First = Value.find_first_not_of(" \t");
+  auto Last = Value.find_last_not_of(" \t");
+  if (First == std::string_view::npos)
     throw std::runtime_error("invalid content length");
-  value = value.substr(first, last - first + 1);
-  size_t length = 0;
-  auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), length);
-  if (error != std::errc{} || end != value.data() + value.size())
+  Value = Value.substr(First, Last - First + 1);
+  size_t Length = 0;
+  auto [end, error] =
+      std::from_chars(Value.data(), Value.data() + Value.size(), Length);
+  if (error != std::errc{} || end != Value.data() + Value.size())
     throw std::runtime_error("invalid content length");
-  return length;
+  return Length;
 }
 
-// Accept one unambiguous fixed-length request; chunking and duplicate lengths are unsupported.
-size_t http_request_size(std::string_view headers) {
-  size_t body_size = 0;
-  bool seen_length = false;
-  size_t pos = headers.find("\r\n") + 2;
-  while (pos < headers.size() - 2) {
-    size_t next = headers.find("\r\n", pos);
-    auto line = headers.substr(pos, next - pos);
-    auto colon = line.find(':');
-    if (colon == std::string_view::npos)
+// Accept one unambiguous fixed-length request; chunking and duplicate lengths
+// are unsupported.
+static size_t httpRequestSize(std::string_view Headers) {
+  size_t BodySize = 0;
+  bool SeenLength = false;
+  size_t Pos = Headers.find("\r\n") + 2;
+  while (Pos < Headers.size() - 2) {
+    size_t Next = Headers.find("\r\n", Pos);
+    auto Line = Headers.substr(Pos, Next - Pos);
+    auto Colon = Line.find(':');
+    if (Colon == std::string_view::npos)
       throw std::runtime_error("invalid HTTP header");
-    std::string name(line.substr(0, colon));
-    std::transform(name.begin(), name.end(), name.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    if (name == "transfer-encoding")
+    std::string Name(Line.substr(0, Colon));
+    std::transform(Name.begin(), Name.end(), Name.begin(),
+                   [](unsigned char C) { return std::tolower(C); });
+    if (Name == "transfer-encoding")
       throw std::runtime_error("transfer encoding unsupported");
-    if (name == "content-length") {
-      if (seen_length)
+    if (Name == "content-length") {
+      if (SeenLength)
         throw std::runtime_error("duplicate content length");
-      seen_length = true;
-      body_size = parse_content_length(line.substr(colon + 1));
+      SeenLength = true;
+      BodySize = parseContentLength(Line.substr(Colon + 1));
     }
-    pos = next + 2;
+    Pos = Next + 2;
   }
-  if (body_size > kMaxHttpBytes - headers.size())
+  if (BodySize > MaxHttpBytes - Headers.size())
     throw std::runtime_error("HTTP request too large");
-  return headers.size() + body_size;
+  return Headers.size() + BodySize;
 }
 
-// Read exactly one bounded HTTP message before passing it to the request handler.
-void read_http_tls(SSL* ssl, Deadline deadline, std::string& raw) {
+// Read exactly one bounded HTTP message before passing it to the request
+// handler.
+static void readHttpTls(SSL *Ssl, Deadline Deadline, std::string &Raw) {
   // Wipe the temporary TLS plaintext even if reading or parsing throws.
   struct ReadBuffer {
-    char data[8192];
-    ~ReadBuffer() {
-      OPENSSL_cleanse(data, sizeof(data));
-    }
-  } buffer;
-  raw.reserve(kMaxHttpBytes);  // Avoid abandoned plaintext copies during string growth.
-  size_t expected_size = 0;
+    char Data[8192];
+    ~ReadBuffer() { OPENSSL_cleanse(this->Data, sizeof(this->Data)); }
+  } Buffer;
+  Raw.reserve(
+      MaxHttpBytes); // Avoid abandoned plaintext copies during string growth.
+  size_t ExpectedSize = 0;
   for (;;) {
-    int count =
-        tls_io(ssl, deadline, [&] { return SSL_read(ssl, buffer.data, sizeof(buffer.data)); });
-    if (raw.size() + count > kMaxHttpBytes)
+    int Count = tlsIo(Ssl, Deadline, [&] {
+      return SSL_read(Ssl, Buffer.Data, sizeof(Buffer.Data));
+    });
+    if (Raw.size() + Count > MaxHttpBytes)
       throw std::runtime_error("HTTP request too large");
-    raw.append(buffer.data, count);
+    Raw.append(Buffer.Data, Count);
 
     // Parse framing once, only after the complete bounded header has arrived.
-    if (expected_size == 0) {
-      auto header_end = raw.find("\r\n\r\n");
-      if (header_end == std::string::npos) {
-        if (raw.size() > kMaxHeaderBytes)
+    if (ExpectedSize == 0) {
+      auto HeaderEnd = Raw.find("\r\n\r\n");
+      if (HeaderEnd == std::string::npos) {
+        if (Raw.size() > MaxHeaderBytes)
           throw std::runtime_error("HTTP headers too large");
         continue;
       }
-      size_t header_size = header_end + 4;
-      if (header_size > kMaxHeaderBytes)
+      size_t HeaderSize = HeaderEnd + 4;
+      if (HeaderSize > MaxHeaderBytes)
         throw std::runtime_error("HTTP headers too large");
-      expected_size = http_request_size(std::string_view(raw).substr(0, header_size));
+      ExpectedSize =
+          httpRequestSize(std::string_view(Raw).substr(0, HeaderSize));
     }
-    if (raw.size() > expected_size)
+    if (Raw.size() > ExpectedSize)
       throw std::runtime_error("HTTP pipelining unsupported");
-    if (raw.size() == expected_size)
+    if (Raw.size() == ExpectedSize)
       return;
   }
 }
 
 // Complete partial response writes using the connection's original deadline.
-void write_http_tls(SSL* ssl, Deadline deadline, const std::string& response) {
-  size_t sent = 0;
-  while (sent < response.size()) {
-    sent += tls_io(ssl, deadline, [&] {
-      return SSL_write(ssl, response.data() + sent, static_cast<int>(response.size() - sent));
+static void writeHttpTls(SSL *Ssl, Deadline Deadline,
+                         const std::string &Response) {
+  size_t Sent = 0;
+  while (Sent < Response.size()) {
+    Sent += tlsIo(Ssl, Deadline, [&] {
+      return SSL_write(Ssl, Response.data() + Sent,
+                       static_cast<int>(Response.size() - Sent));
     });
   }
 }
 
-}  // namespace
+UnlockService::UnlockService(std::filesystem::path VaultDir,
+                             std::string ExpectedLogin)
+    : VaultDir(std::move(VaultDir)), ExpectedLogin(std::move(ExpectedLogin)) {}
 
-UnlockService::UnlockService(std::filesystem::path vault_dir, std::string expected_login)
-    : vault_dir_(std::move(vault_dir)), expected_login_(std::move(expected_login)) {}
-
-std::string UnlockService::create_token_for(const UnlockRequestSpec& spec, UnlockMode mode,
-                                            InitPlan plan) {
-  std::string token = random_token();
-  tokens_[token] = TokenRecord{spec,
-                               std::chrono::steady_clock::now() + spec.ttl,
-                               false,
-                               mode,
-                               std::move(plan),
-                               random_six_digit_code().str(),
-                               SecureBuffer{},
-                               0};
-  return token;
+std::string UnlockService::createTokenFor(const UnlockRequestSpec &Spec,
+                                          UnlockMode Mode, InitPlan Plan) {
+  std::string Token = randomToken();
+  this->Tokens[Token] = TokenRecord{Spec,
+                                    std::chrono::steady_clock::now() + Spec.Ttl,
+                                    false,
+                                    Mode,
+                                    std::move(Plan),
+                                    randomSixDigitCode().str(),
+                                    SecureBuffer{},
+                                    0};
+  return Token;
 }
 
-std::string UnlockService::create_token(const UnlockRequestSpec& spec) {
-  return create_token_for(spec, UnlockMode::Unlock);
+std::string UnlockService::createToken(const UnlockRequestSpec &Spec) {
+  return createTokenFor(Spec, UnlockMode::Unlock);
 }
 
-std::string UnlockService::create_store_token(const UnlockRequestSpec& spec) {
-  return create_token_for(spec, UnlockMode::Store);
+std::string UnlockService::createStoreToken(const UnlockRequestSpec &Spec) {
+  return createTokenFor(Spec, UnlockMode::Store);
 }
 
-std::string UnlockService::create_init_token(const UnlockRequestSpec& spec, InitPlan plan) {
-  auto token = create_token_for(spec, UnlockMode::Init, std::move(plan));
-  auto& record = tokens_.at(token);
-  // Keep the secret independent of, and distinct from, the public visual identifier.
+std::string UnlockService::createInitToken(const UnlockRequestSpec &Spec,
+                                           InitPlan Plan) {
+  auto Token = createTokenFor(Spec, UnlockMode::Init, std::move(Plan));
+  auto &Record = this->Tokens.at(Token);
+  // Keep the secret independent of, and distinct from, the public visual
+  // identifier.
   do {
-    record.setup_code = random_six_digit_code();
-  } while (CRYPTO_memcmp(record.setup_code.data(), record.display_code.data(), 6) == 0);
-  return token;
+    Record.SetupCode = randomSixDigitCode();
+  } while (CRYPTO_memcmp(Record.SetupCode.data(), Record.DisplayCode.data(),
+                         6) == 0);
+  return Token;
 }
 
 // Do not expose an identifier for an expired or consumed request.
-std::string UnlockService::request_code(const std::string& token) const {
-  auto it = tokens_.find(token);
-  if (it == tokens_.end() || it->second.used ||
-      std::chrono::steady_clock::now() > it->second.expires_at)
+std::string UnlockService::requestCode(const std::string &Token) const {
+  auto It = this->Tokens.find(Token);
+  if (It == this->Tokens.end() || It->second.Used ||
+      std::chrono::steady_clock::now() > It->second.ExpiresAt)
     throw CryptoError("request is not active");
-  return it->second.display_code;
+  return It->second.DisplayCode;
 }
 
-// Only live initialization requests expose their secret to trusted local callers.
-const SecureBuffer& UnlockService::setup_code(const std::string& token) const {
-  auto it = tokens_.find(token);
-  if (it == tokens_.end() || it->second.used || it->second.mode != UnlockMode::Init ||
-      std::chrono::steady_clock::now() > it->second.expires_at)
+// Only live initialization requests expose their secret to trusted local
+// callers.
+const SecureBuffer &UnlockService::setupCode(const std::string &Token) const {
+  auto It = this->Tokens.find(Token);
+  if (It == this->Tokens.end() || It->second.Used ||
+      It->second.Mode != UnlockMode::Init ||
+      std::chrono::steady_clock::now() > It->second.ExpiresAt)
     throw CryptoError("setup request is not active");
-  return it->second.setup_code;
+  return It->second.SetupCode;
 }
 
-// One place that decides whether a token may act: it must exist, be unused, be presented on the
-// path matching the mode it was minted for, and be inside its TTL.
-UnlockService::TokenRecord* UnlockService::live_token(const std::string& token, UnlockMode mode) {
-  auto it = tokens_.find(token);
-  if (it == tokens_.end() || it->second.used || it->second.mode != mode ||
-      std::chrono::steady_clock::now() > it->second.expires_at) {
+// One place that decides whether a token may act: it must exist, be unused, be
+// presented on the path matching the mode it was minted for, and be inside its
+// TTL.
+UnlockService::TokenRecord *UnlockService::liveToken(const std::string &Token,
+                                                     UnlockMode Mode) {
+  auto It = this->Tokens.find(Token);
+  if (It == this->Tokens.end() || It->second.Used || It->second.Mode != Mode ||
+      std::chrono::steady_clock::now() > It->second.ExpiresAt) {
     return nullptr;
   }
-  return &it->second;
+  return &It->second;
 }
 
-HttpResponse UnlockService::handle(const HttpRequest& request) {
+HttpResponse UnlockService::handle(const HttpRequest &Request) {
   struct Route {
-    const char* prefix;
-    UnlockMode mode;
+    const char *Prefix;
+    UnlockMode Mode;
   };
-  static constexpr Route kRoutes[] = {
+  static constexpr Route Routes[] = {
       {"/unlock/", UnlockMode::Unlock},
       {"/store/", UnlockMode::Store},
       {"/init/", UnlockMode::Init},
   };
 
-  for (const auto& route : kRoutes) {
-    std::string token = token_from_target(request.target, route.prefix);
-    if (token.empty())
+  for (const auto &Route : Routes) {
+    std::string Token = tokenFromTarget(Request.Target, Route.Prefix);
+    if (Token.empty())
       continue;
-    if (request.method == "GET")
-      return render_form(token, route.mode);
-    if (request.method == "POST")
-      return handle_submit(token, request.body, route.mode);
+    if (Request.Method == "GET")
+      return renderForm(Token, Route.Mode);
+    if (Request.Method == "POST")
+      return handleSubmit(Token, Request.Body, Route.Mode);
     return {405, "text/plain; charset=utf-8", "Method not allowed"};
   }
   return {404, "text/plain; charset=utf-8", "Not found"};
 }
 
-HttpResponse UnlockService::render_form(const std::string& token, UnlockMode mode) {
-  const TokenRecord* record = live_token(token, mode);
-  if (record == nullptr)
+HttpResponse UnlockService::renderForm(const std::string &Token,
+                                       UnlockMode Mode) {
+  const TokenRecord *Record = liveToken(Token, Mode);
+  if (Record == nullptr)
     return {410, "text/plain; charset=utf-8", "Unlock link expired"};
 
-  const auto& spec = record->spec;
-  const bool init_mode = mode == UnlockMode::Init;
+  const auto &Spec = Record->Spec;
+  const bool InitMode = Mode == UnlockMode::Init;
 
-  std::string title = "Alfie Vault Unlock";
-  std::string action_path = "/unlock/";
-  std::string button = "Unlock once";
-  if (init_mode) {
-    title = "FIRST-TIME VAULT SETUP";
-    action_path = "/init/";
-    button = "Create vault";
-  } else if (mode == UnlockMode::Store) {
-    title = "Alfie Vault Store";
-    action_path = "/store/";
-    button = "Store once";
+  std::string Title = "Alfie Vault Unlock";
+  std::string ActionPath = "/unlock/";
+  std::string Button = "Unlock once";
+  if (InitMode) {
+    Title = "FIRST-TIME VAULT SETUP";
+    ActionPath = "/init/";
+    Button = "Create vault";
+  } else if (Mode == UnlockMode::Store) {
+    Title = "Alfie Vault Store";
+    ActionPath = "/store/";
+    Button = "Store once";
   }
 
-  // The setup page is the highest-value phishing target in the system: it is the one page that
-  // asks for the password protecting everything, and the one page a user reaches by clicking
-  // through a certificate warning. So it does not look like the routine pages -- red, not
-  // slate -- and it says plainly what it is and when it should never appear.
-  const char* surface = init_mode ? "#450a0a" : "#0f172a";
-  const char* card = init_mode ? "#7f1d1d" : "#111827";
-  const char* border = init_mode ? "#f87171" : "#334155";
-  const char* accent = init_mode ? "#dc2626" : "#2563eb";
-  const char* field = init_mode ? "#1c0606" : "#020617";
+  // The setup page is the highest-value phishing target in the system: it is
+  // the one page that asks for the password protecting everything, and the one
+  // page a user reaches by clicking through a certificate warning. So it does
+  // not look like the routine pages -- red, not slate -- and it says plainly
+  // what it is and when it should never appear.
+  const char *Surface = InitMode ? "#450a0a" : "#0f172a";
+  const char *Card = InitMode ? "#7f1d1d" : "#111827";
+  const char *Border = InitMode ? "#f87171" : "#334155";
+  const char *Accent = InitMode ? "#dc2626" : "#2563eb";
+  const char *Field = InitMode ? "#1c0606" : "#020617";
 
-  std::string meta_lines;
-  if (init_mode) {
-    meta_lines =
-        "<p class=\"warn\"><strong>You should see this page exactly once.</strong> "
-        "It creates a brand-new vault and sets the login and master password it will use "
-        "forever. If you have already set up Alfie, close this page now &mdash; someone may be "
-        "trying to collect your master password.</p>"
-        "<p class=\"meta\">There is no recovery. If the master password is lost, every record "
-        "in the vault is unreadable.</p>";
-    if (!transport_fingerprint_.empty()) {
-      meta_lines +=
-          "<p class=\"meta\">Check this against the fingerprint printed on the server's "
-          "terminal before typing anything:</p><p class=\"fp\">" +
-          html_escape(transport_fingerprint_) + "</p>";
+  std::string MetaLines;
+  if (InitMode) {
+    MetaLines = "<p class=\"warn\"><strong>You should see this page exactly "
+                "once.</strong> "
+                "It creates a brand-new vault and sets the login and master "
+                "password it will use "
+                "forever. If you have already set up Alfie, close this page "
+                "now &mdash; someone may be "
+                "trying to collect your master password.</p>"
+                "<p class=\"meta\">There is no recovery. If the master "
+                "password is lost, every record "
+                "in the vault is unreadable.</p>";
+    if (!this->TransportFingerprint.empty()) {
+      MetaLines += "<p class=\"meta\">Check this against the fingerprint "
+                   "printed on the server's "
+                   "terminal before typing anything:</p><p class=\"fp\">" +
+                   htmlEscape(this->TransportFingerprint) + "</p>";
     }
   } else {
-    meta_lines = "<p class=\"meta\">Domain: " + html_escape(spec.domain) +
-                 "</p><p class=\"meta\">Action: " + html_escape(spec.action) + "</p>";
+    MetaLines = "<p class=\"meta\">Domain: " + htmlEscape(Spec.Domain) +
+                "</p><p class=\"meta\">Action: " + htmlEscape(Spec.Action) +
+                "</p>";
   }
 
-  // The bot and page share this identifier; it is not a password or authorization factor.
-  meta_lines +=
+  // The bot and page share this identifier; it is not a password or
+  // authorization factor.
+  MetaLines +=
       "<p class=\"meta\">Match this request code with the bot's message:</p>"
       "<p class=\"fp\" style=\"font-size:32px;letter-spacing:0.15em\">" +
-      record->display_code + "</p>";
+      Record->DisplayCode + "</p>";
 
-  std::string extra_field;
-  if (init_mode) {
-    extra_field =
-        "<label>Confirm vault password <input name=\"confirm\" type=\"password\" "
+  std::string ExtraField;
+  if (InitMode) {
+    ExtraField =
+        "<label>Confirm vault password <input name=\"confirm\" "
+        "type=\"password\" "
         "autocomplete=\"new-password\"></label>"
         "<label>One-time setup code from the terminal "
         "<input name=\"setup_code\" type=\"password\" inputmode=\"numeric\" "
         "pattern=\"[0-9]{6}\" minlength=\"6\" maxlength=\"6\" "
         "autocomplete=\"off\" required></label>"
         "<p class=\"meta\">Two incorrect setup codes invalidate this link.</p>";
-  } else if (mode == UnlockMode::Store) {
-    extra_field =
-        "<label>Secret JSON <textarea name=\"value\" "
-        "autocomplete=\"off\"></textarea></label><br>";
+  } else if (Mode == UnlockMode::Store) {
+    ExtraField = "<label>Secret JSON <textarea name=\"value\" "
+                 "autocomplete=\"off\"></textarea></label><br>";
   }
-  const std::string password_autocomplete = init_mode ? "new-password" : "current-password";
-  const std::string password_hint = init_mode ? " <span class=\"hint\">(at least " +
-                                                    std::to_string(kMinimumMasterPasswordLength) +
-                                                    " characters)</span>"
-                                              : "";
+  const std::string PasswordAutocomplete =
+      InitMode ? "new-password" : "current-password";
+  const std::string PasswordHint =
+      InitMode ? " <span class=\"hint\">(at least " +
+                     std::to_string(MinimumMasterPasswordLength) +
+                     " characters)</span>"
+               : "";
 
-  std::string body =
+  std::string Body =
       std::string(
           "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
           "<meta name=\"viewport\" "
           "content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
           "<title>") +
-      title +
+      Title +
       "</title><style>"
       ":root{color-scheme:dark}*{box-sizing:border-box}"
-      "body{margin:0;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe "
+      "body{margin:0;min-height:100vh;font-family:-apple-system,"
+      "BlinkMacSystemFont,'Segoe "
       "UI',Roboto,sans-serif;"
       "background:" +
-      surface +
-      ";color:#f8fafc;display:flex;align-items:center;justify-content:center;padding:24px}"
+      Surface +
+      ";color:#f8fafc;display:flex;align-items:center;justify-content:center;"
+      "padding:24px}"
       ".card{width:100%;max-width:520px;background:" +
-      card + ";border:2px solid " + border +
+      Card + ";border:2px solid " + Border +
       ";border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.45)}"
       "h1{font-size:1.4rem;margin:0 0 16px;letter-spacing:.02em}"
       ".meta{color:#e2e8f0;font-size:.95rem;margin:8px 0}"
-      ".warn{background:#1c0606;border:1px solid #f87171;border-radius:12px;padding:14px;"
+      ".warn{background:#1c0606;border:1px solid "
+      "#f87171;border-radius:12px;padding:14px;"
       "margin:0 0 14px;color:#fecaca;font-size:.95rem;line-height:1.45}"
-      ".fp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;"
-      "word-break:break-all;background:#1c0606;border-radius:10px;padding:10px;color:#fecaca}"
+      ".fp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:."
+      "78rem;"
+      "word-break:break-all;background:#1c0606;border-radius:10px;padding:10px;"
+      "color:#fecaca}"
       ".hint{font-weight:400;color:#e2e8f0;font-size:.85rem}"
       "label{display:block;margin-top:16px;font-weight:600}"
-      "input,textarea,button{width:100%;font:inherit;border-radius:12px;border:1px solid "
+      "input,textarea,button{width:100%;font:inherit;border-radius:12px;border:"
+      "1px solid "
       "#475569;padding:14px;margin-top:8px}"
       "input,textarea{background:" +
-      field +
+      Field +
       ";color:#f8fafc}textarea{min-height:120px}"
       "button{background:" +
-      accent +
+      Accent +
       ";color:white;border:0;font-weight:700;margin-top:20px;cursor:pointer}"
       "@media "
-      "(max-width:540px){body{padding:12px;align-items:stretch}.card{border-radius:14px;padding:"
+      "(max-width:540px){body{padding:12px;align-items:stretch}.card{border-"
+      "radius:14px;padding:"
       "18px}}"
       "</style></head><body><main class=\"card\"><h1>" +
-      title + "</h1>" + meta_lines + "<form method=\"post\" action=\"" + action_path +
-      html_escape(token) +
-      "\"><label>Login <input name=\"login\" autocomplete=\"username\" autocapitalize=\"none\" "
+      Title + "</h1>" + MetaLines + "<form method=\"post\" action=\"" +
+      ActionPath + htmlEscape(Token) +
+      "\"><label>Login <input name=\"login\" autocomplete=\"username\" "
+      "autocapitalize=\"none\" "
       "spellcheck=\"false\" inputmode=\"text\"></label>"
       "<label>Vault password" +
-      password_hint + " <input name=\"password\" type=\"password\" autocomplete=\"" +
-      password_autocomplete + "\"></label>" + extra_field + "<button type=\"submit\">" + button +
+      PasswordHint +
+      " <input name=\"password\" type=\"password\" autocomplete=\"" +
+      PasswordAutocomplete + "\"></label>" + ExtraField +
+      "<button type=\"submit\">" + Button +
       "</button></form></main></body></html>";
-  return {200, "text/html; charset=utf-8", body};
+  return {200, "text/html; charset=utf-8", Body};
 }
 
-// Creates the vault, then the CA, in that order. The CA private key is generated in memory and
-// stored in the vault it just created; it is never written to disk. Only public certificates
-// and the server key (0600) reach the filesystem.
-HttpResponse UnlockService::run_first_time_install(TokenRecord& record, const std::string& login,
-                                                   SecureBuffer& password) {
-  const InitPlan& plan = record.plan;
+// Creates the vault, then the CA, in that order. The CA private key is
+// generated in memory and stored in the vault it just created; it is never
+// written to disk. Only public certificates and the server key (0600) reach the
+// filesystem.
+HttpResponse UnlockService::runFirstTimeInstall(TokenRecord &Record,
+                                                const std::string &Login,
+                                                SecureBuffer &Password) {
+  const InitPlan &Plan = Record.Plan;
   try {
-    // Copy directly between secure allocations; setup needs two separate derivations.
-    SecureBuffer for_init(SecureBytes(password.bytes()));
-    init_vault(vault_dir_, login, for_init);
+    // Copy directly between secure allocations; setup needs two separate
+    // derivations.
+    SecureBuffer ForInit(SecureBytes(Password.bytes()));
+    initVault(this->VaultDir, Login, ForInit);
 
-    GeneratedCertificate ca = generate_ca_certificate(plan.ca_common_name, 3650, plan.ca_rsa_bits);
+    GeneratedCertificate Ca =
+        generateCaCertificate(Plan.CaCommonName, 3650, Plan.CaRsaBits);
 
     {
-      SecureBuffer for_session(SecureBytes(password.bytes()));
-      VaultSession session = VaultSession::open(vault_dir_, login, for_session);
-      session.put(kCaKeyPurpose, kCaKeyDomain, kCaKeyAccount, ca.private_key_pem);
+      SecureBuffer ForSession(SecureBytes(Password.bytes()));
+      VaultSession Session =
+          VaultSession::open(this->VaultDir, Login, ForSession);
+      Session.put(CaKeyPurpose, CaKeyDomain, CaKeyAccount, Ca.PrivateKeyPem);
     }
 
-    const auto ca_cert_path = plan.output_dir / "alfie-local-ca-cert.pem";
-    write_public_file(ca_cert_path, ca.certificate_pem);
+    const auto CaCertPath = Plan.OutputDir / "alfie-local-ca-cert.pem";
+    writePublicFile(CaCertPath, Ca.CertificatePem);
 
-    std::string server_cert_path;
-    if (!plan.server_ip.empty()) {
-      GeneratedCertificate server = issue_ip_certificate(
-          plan.server_ip, ca.certificate_pem, ca.private_key_pem, 825, plan.server_rsa_bits);
-      write_public_file(plan.output_dir / "alfie-ip-cert.pem", server.certificate_pem);
-      write_private_file(plan.output_dir / "alfie-ip-key.pem", server.private_key_pem);
-      server_cert_path = (plan.output_dir / "alfie-ip-cert.pem").string();
+    std::string ServerCertPath;
+    if (!Plan.ServerIp.empty()) {
+      GeneratedCertificate Server =
+          issueIpCertificate(Plan.ServerIp, Ca.CertificatePem, Ca.PrivateKeyPem,
+                             825, Plan.ServerRsaBits);
+      writePublicFile(Plan.OutputDir / "alfie-ip-cert.pem",
+                      Server.CertificatePem);
+      writePrivateFile(Plan.OutputDir / "alfie-ip-key.pem",
+                       Server.PrivateKeyPem);
+      ServerCertPath = (Plan.OutputDir / "alfie-ip-cert.pem").string();
     }
 
-    record.setup_code.truncate(0);  // Erase the one-time secret after successful setup.
-    record.used = true;
-    finished_ = true;
+    Record.SetupCode.truncate(
+        0); // Erase the one-time secret after successful setup.
+    Record.Used = true;
+    this->Finished = true;
 
-    const std::string ca_fingerprint = certificate_fingerprint_sha256(ca.certificate_pem);
-    return {201, "text/html; charset=utf-8",
-            "<!doctype html><html><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-            "<title>Vault created</title></head><body "
-            "style=\"font-family:-apple-system,sans-serif;background:#450a0a;color:#f8fafc;"
-            "padding:24px\">"
-            "<h1>Vault created</h1><p>The login and master password are set, and the local CA "
-            "private key is stored inside the vault. This setup link is now dead.</p>"
-            "<p>Install and trust this CA certificate on your devices:<br><code>" +
-                html_escape(ca_cert_path.string()) + "</code></p><p>Request code: <strong>" +
-                record.display_code +
-                "</strong></p><p>Verify the full SHA-256 fingerprint before "
-                "trusting the CA:<br><code style=\"word-break:break-all\">" +
-                html_escape(ca_fingerprint) + "</code></p>" +
-                (server_cert_path.empty()
-                     ? std::string{}
-                     : "<p>Server certificate for future unlock sessions:<br><code>" +
-                           html_escape(server_cert_path) + "</code></p>") +
-                "</body></html>"};
-  } catch (const std::exception&) {
+    const std::string CaFingerprint =
+        certificateFingerprintSha256(Ca.CertificatePem);
+    return {
+        201, "text/html; charset=utf-8",
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" "
+        "content=\"width=device-width,initial-scale=1\">"
+        "<title>Vault created</title></head><body "
+        "style=\"font-family:-apple-system,sans-serif;background:#450a0a;color:"
+        "#f8fafc;"
+        "padding:24px\">"
+        "<h1>Vault created</h1><p>The login and master password are set, and "
+        "the local CA "
+        "private key is stored inside the vault. This setup link is now "
+        "dead.</p>"
+        "<p>Install and trust this CA certificate on your devices:<br><code>" +
+            htmlEscape(CaCertPath.string()) +
+            "</code></p><p>Request code: <strong>" + Record.DisplayCode +
+            "</strong></p><p>Verify the full SHA-256 fingerprint before "
+            "trusting the CA:<br><code style=\"word-break:break-all\">" +
+            htmlEscape(CaFingerprint) + "</code></p>" +
+            (ServerCertPath.empty()
+                 ? std::string{}
+                 : "<p>Server certificate for future unlock "
+                   "sessions:<br><code>" +
+                       htmlEscape(ServerCertPath) + "</code></p>") +
+            "</body></html>"};
+  } catch (const std::exception &) {
     return {409, "text/plain; charset=utf-8", "Vault setup failed"};
   }
 }
 
-HttpResponse UnlockService::handle_submit(const std::string& token, const std::string& form_body,
-                                          UnlockMode mode) {
-  TokenRecord* record = live_token(token, mode);
-  if (record == nullptr)
+HttpResponse UnlockService::handleSubmit(const std::string &Token,
+                                         const std::string &FormBody,
+                                         UnlockMode Mode) {
+  TokenRecord *Record = liveToken(Token, Mode);
+  if (Record == nullptr)
     return {410, "text/plain; charset=utf-8", "Unlock link expired"};
 
-  auto form = parse_form(form_body);
-  auto& fields = form.values;
-  // Check before credentials or KDF work; missing and malformed codes count as failures.
-  if (mode == UnlockMode::Init) {
-    auto code = fields.find("setup_code");
-    bool matches = code != fields.end() && code->second.size() == 6 &&
-                   record->setup_code.size() == 6 &&
-                   CRYPTO_memcmp(code->second.data(), record->setup_code.data(), 6) == 0;
-    if (!matches) {
-      if (++record->setup_failures >= 2) {
-        record->used = true;
-        record->setup_code.truncate(0);
+  auto Form = parseForm(FormBody);
+  auto &Fields = Form.Values;
+  // Check before credentials or KDF work; missing and malformed codes count as
+  // failures.
+  if (Mode == UnlockMode::Init) {
+    auto Code = Fields.find("setup_code");
+    bool Matches =
+        Code != Fields.end() && Code->second.size() == 6 &&
+        Record->SetupCode.size() == 6 &&
+        CRYPTO_memcmp(Code->second.data(), Record->SetupCode.data(), 6) == 0;
+    if (!Matches) {
+      if (++Record->SetupFailures >= 2) {
+        Record->Used = true;
+        Record->SetupCode.truncate(0);
         return {410, "text/plain; charset=utf-8",
                 "Setup link invalidated after two incorrect codes"};
       }
-      return {403, "text/plain; charset=utf-8", "Incorrect setup code. One attempt remaining."};
+      return {403, "text/plain; charset=utf-8",
+              "Incorrect setup code. One attempt remaining."};
     }
   }
-  auto login = fields.find("login");
-  auto password = fields.find("password");
-  if (login == fields.end() || password == fields.end())
+  auto Login = Fields.find("login");
+  auto Password = Fields.find("password");
+  if (Login == Fields.end() || Password == Fields.end())
     return {400, "text/plain; charset=utf-8", "Missing login or password"};
 
-  // Transfer the decoded password without leaving a second plaintext allocation.
-  SecureBuffer master_password = std::move(password->second);
-  const std::string login_name = login->second.str();
+  // Transfer the decoded password without leaving a second plaintext
+  // allocation.
+  SecureBuffer MasterPassword = std::move(Password->second);
+  const std::string LoginName = Login->second.str();
 
-  if (mode == UnlockMode::Init) {
-    auto confirm = fields.find("confirm");
-    const bool matched =
-        confirm != fields.end() && confirm->second.size() == master_password.size() &&
-        CRYPTO_memcmp(confirm->second.data(), master_password.data(), master_password.size()) == 0;
-    if (confirm != fields.end()) {
-      confirm->second.truncate(0);
+  if (Mode == UnlockMode::Init) {
+    auto Confirm = Fields.find("confirm");
+    const bool Matched =
+        Confirm != Fields.end() &&
+        Confirm->second.size() == MasterPassword.size() &&
+        CRYPTO_memcmp(Confirm->second.data(), MasterPassword.data(),
+                      MasterPassword.size()) == 0;
+    if (Confirm != Fields.end()) {
+      Confirm->second.truncate(0);
     }
-    if (!matched)
+    if (!Matched)
       return {400, "text/plain; charset=utf-8", "Passwords do not match"};
-    if (login->second.empty())
+    if (Login->second.empty())
       return {400, "text/plain; charset=utf-8", "Login must not be empty"};
-    // The master password can never be changed, so the one moment it is chosen is the only
-    // chance to refuse a hopeless one.
-    if (master_password.size() < kMinimumMasterPasswordLength) {
+    // The master password can never be changed, so the one moment it is chosen
+    // is the only chance to refuse a hopeless one.
+    if (MasterPassword.size() < MinimumMasterPasswordLength) {
       return {400, "text/plain; charset=utf-8",
-              "Master password must be at least " + std::to_string(kMinimumMasterPasswordLength) +
-                  " characters"};
+              "Master password must be at least " +
+                  std::to_string(MinimumMasterPasswordLength) + " characters"};
     }
-    return run_first_time_install(*record, login_name, master_password);
+    return runFirstTimeInstall(*Record, LoginName, MasterPassword);
   }
 
-  if (!vault_initialized(vault_dir_))
+  if (!vaultInitialized(this->VaultDir))
     return {409, "text/plain; charset=utf-8", "Vault is not initialized"};
 
-  // One Argon2id derivation covers both the credential check and the record operation: the
-  // session verifies login + master password against the stored verifiers, then holds the
-  // derived keys for exactly this request. Legacy ALFIEVAULT1 vaults have no verifiers and fall
-  // back to the login supplied at server start.
-  const bool has_verifiers = vault_has_credentials(vault_dir_);
-  if (!has_verifiers && login_name != expected_login_)
+  // One Argon2id derivation covers both the credential check and the record
+  // operation: the session verifies login + master password against the stored
+  // verifiers, then holds the derived keys for exactly this request. Legacy
+  // ALFIEVAULT1 vaults have no verifiers and fall back to the login supplied at
+  // server start.
+  const bool HasVerifiers = vaultHasCredentials(this->VaultDir);
+  if (!HasVerifiers && LoginName != this->ExpectedLogin)
     return {403, "text/plain; charset=utf-8", "Bad login"};
 
-  std::optional<VaultSession> session;
+  std::optional<VaultSession> Session;
   try {
-    session.emplace(has_verifiers ? VaultSession::open(vault_dir_, login_name, master_password)
-                                  : VaultSession::open_with_password(vault_dir_, master_password));
-  } catch (const std::exception&) {
+    Session.emplace(
+        HasVerifiers
+            ? VaultSession::open(this->VaultDir, LoginName, MasterPassword)
+            : VaultSession::openWithPassword(this->VaultDir, MasterPassword));
+  } catch (const std::exception &) {
     return {403, "text/plain; charset=utf-8", "Bad login or password"};
   }
 
-  const auto spec = record->spec;
+  const auto Spec = Record->Spec;
   try {
-    if (mode == UnlockMode::Store) {
-      auto value = fields.find("value");
-      if (value == fields.end() || value->second.empty())
+    if (Mode == UnlockMode::Store) {
+      auto Value = Fields.find("value");
+      if (Value == Fields.end() || Value->second.empty())
         return {400, "text/plain; charset=utf-8", "Missing secret value"};
       // Move the submitted secret into its single-use storage operation.
-      SecureBuffer secret_value = std::move(value->second);
-      session->put(spec.purpose, spec.domain, spec.account, secret_value);
-      last_delivery_ =
-          DeliveredSecret{token, spec.domain, spec.account, spec.action, secret_value.size()};
+      SecureBuffer SecretValue = std::move(Value->second);
+      Session->put(Spec.Purpose, Spec.Domain, Spec.Account, SecretValue);
+      this->LastDelivery = DeliveredSecret{Token, Spec.Domain, Spec.Account,
+                                           Spec.Action, SecretValue.size()};
     } else {
-      session->use(spec.purpose, spec.domain, spec.account, [&](const SecureBuffer& secret) {
-        // Real browser-worker delivery will use encrypted IPC. Until that integration, store
-        // only metadata proving that one secret was unlocked; never store payload.
-        last_delivery_ =
-            DeliveredSecret{token, spec.domain, spec.account, spec.action, secret.size()};
-      });
+      Session->use(Spec.Purpose, Spec.Domain, Spec.Account,
+                   [&](const SecureBuffer &Secret) {
+                     // Real browser-worker delivery will use encrypted IPC.
+                     // Until that integration, store only metadata proving that
+                     // one secret was unlocked; never store payload.
+                     this->LastDelivery =
+                         DeliveredSecret{Token, Spec.Domain, Spec.Account,
+                                         Spec.Action, Secret.size()};
+                   });
     }
-    record->used = true;
+    Record->Used = true;
     return {200, "text/html; charset=utf-8",
-            mode == UnlockMode::Unlock
-                ? "<html><body>Unlocked. Credential delivered to local worker.</body></html>"
+            Mode == UnlockMode::Unlock
+                ? "<html><body>Unlocked. Credential delivered to local "
+                  "worker.</body></html>"
                 : "<html><body>Stored.</body></html>"};
-  } catch (const std::exception&) {
+  } catch (const std::exception &) {
     return {403, "text/plain; charset=utf-8", "Unlock failed"};
   }
 }
 
-HttpRequest parse_http_request(const std::string& raw) {
-  HttpRequest req;
-  auto header_end = raw.find("\r\n\r\n");
-  std::string head = raw.substr(0, header_end == std::string::npos ? raw.size() : header_end);
-  req.body = header_end == std::string::npos ? std::string{} : raw.substr(header_end + 4);
-  std::istringstream in(head);
-  std::string version;
-  in >> req.method >> req.target >> version;
-  std::string line;
-  std::getline(in, line);
-  while (std::getline(in, line)) {
-    if (!line.empty() && line.back() == '\r')
-      line.pop_back();
-    auto colon = line.find(':');
-    if (colon == std::string::npos)
+HttpRequest alfie::parseHttpRequest(const std::string &Raw) {
+  HttpRequest Req;
+  auto HeaderEnd = Raw.find("\r\n\r\n");
+  std::string Head =
+      Raw.substr(0, HeaderEnd == std::string::npos ? Raw.size() : HeaderEnd);
+  Req.Body = HeaderEnd == std::string::npos ? std::string{}
+                                            : Raw.substr(HeaderEnd + 4);
+  std::istringstream In(Head);
+  std::string Version;
+  In >> Req.Method >> Req.Target >> Version;
+  std::string Line;
+  std::getline(In, Line);
+  while (std::getline(In, Line)) {
+    if (!Line.empty() && Line.back() == '\r')
+      Line.pop_back();
+    auto Colon = Line.find(':');
+    if (Colon == std::string::npos)
       continue;
-    std::string name = line.substr(0, colon);
-    std::transform(name.begin(), name.end(), name.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-    std::string value = line.substr(colon + 1);
-    while (!value.empty() && value.front() == ' ')
-      value.erase(value.begin());
-    req.headers[name] = value;
+    std::string Name = Line.substr(0, Colon);
+    std::transform(Name.begin(), Name.end(), Name.begin(),
+                   [](unsigned char C) { return std::tolower(C); });
+    std::string Value = Line.substr(Colon + 1);
+    while (!Value.empty() && Value.front() == ' ')
+      Value.erase(Value.begin());
+    Req.Headers[Name] = Value;
   }
-  return req;
+  return Req;
 }
 
-std::string http_response_text(const HttpResponse& response) {
-  std::ostringstream out;
-  out << "HTTP/1.1 " << response.status << " " << status_text(response.status) << "\r\n"
-      << "Content-Type: " << response.content_type << "\r\n"
-      << "Content-Length: " << response.body.size() << "\r\n"
+std::string alfie::httpResponseText(const HttpResponse &Response) {
+  std::ostringstream Out;
+  Out << "HTTP/1.1 " << Response.Status << " " << statusText(Response.Status)
+      << "\r\n"
+      << "Content-Type: " << Response.ContentType << "\r\n"
+      << "Content-Length: " << Response.Body.size() << "\r\n"
       << "Cache-Control: no-store\r\n"
       << "Connection: close\r\n\r\n"
-      << response.body;
-  return out.str();
+      << Response.Body;
+  return Out.str();
 }
 
-namespace {
-
 // Validate the endpoint and finish listener setup before accepting connections.
-int bind_tls_listener(const std::string& host, int port) {
-  if (port < 1 || port > 65535)
+static int bindTlsListener(const std::string &Host, int Port) {
+  if (Port < 1 || Port > 65535)
     throw std::runtime_error("invalid TCP port");
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_port = htons(static_cast<uint16_t>(port));
-  if (inet_pton(AF_INET, host.c_str(), &address.sin_addr) != 1)
+  sockaddr_in Address{};
+  Address.sin_family = AF_INET;
+  Address.sin_port = htons(static_cast<uint16_t>(Port));
+  if (inet_pton(AF_INET, Host.c_str(), &Address.sin_addr) != 1)
     throw std::runtime_error("bind host must be IPv4 address");
 
-  ScopedFd listener(socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
-  if (listener.get() < 0)
-    throw sys_error("socket");
+  ScopedFd Listener(socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0));
+  if (Listener.get() < 0)
+    throw sysError("socket");
   // Check the portable CLOEXEC fallback and permit restart after TCP TIME_WAIT.
-  int yes = 1;
-  if (fcntl(listener.get(), F_SETFD, FD_CLOEXEC) != 0 ||
-      setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) != 0)
-    throw sys_error("configure TLS listener");
-  if (bind(listener.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0)
-    throw sys_error("bind");
-  if (listen(listener.get(), 16) != 0)
-    throw sys_error("listen");
-  return listener.release();
+  int Yes = 1;
+  if (fcntl(Listener.get(), F_SETFD, FD_CLOEXEC) != 0 ||
+      setsockopt(Listener.get(), SOL_SOCKET, SO_REUSEADDR, &Yes, sizeof(Yes)) !=
+          0)
+    throw sysError("configure TLS listener");
+  if (bind(Listener.get(), reinterpret_cast<sockaddr *>(&Address),
+           sizeof(Address)) != 0)
+    throw sysError("bind");
+  if (listen(Listener.get(), 16) != 0)
+    throw sysError("listen");
+  return Listener.release();
 }
 
 // Handle one TLS exchange with scoped plaintext and OpenSSL cleanup.
-void serve_tls_client(SSL_CTX* context, int client, UnlockService& service) {
-  std::unique_ptr<SSL, decltype(&SSL_free)> ssl(SSL_new(context), SSL_free);
-  if (!ssl || fcntl(client, F_SETFL, O_NONBLOCK) != 0 || SSL_set_fd(ssl.get(), client) != 1)
+static void serveTlsClient(SSL_CTX *Context, int Client,
+                           UnlockService &Service) {
+  std::unique_ptr<SSL, decltype(&SSL_free)> Ssl(SSL_new(Context), SSL_free);
+  if (!Ssl || fcntl(Client, F_SETFL, O_NONBLOCK) != 0 ||
+      SSL_set_fd(Ssl.get(), Client) != 1)
     throw std::runtime_error("configure TLS client failed");
-  auto deadline = std::chrono::steady_clock::now() + kConnectionTimeout;
-  tls_io(ssl.get(), deadline, [&] { return SSL_accept(ssl.get()); });
+  auto Deadline = std::chrono::steady_clock::now() + ConnectionTimeout;
+  tlsIo(Ssl.get(), Deadline, [&] { return SSL_accept(Ssl.get()); });
 
-  std::string raw;
-  WipeString wipe_raw{raw};
-  read_http_tls(ssl.get(), deadline, raw);
-  auto request = parse_http_request(raw);
-  WipeString wipe_body{request.body};
-  auto response = http_response_text(service.handle(request));
-  write_http_tls(ssl.get(), deadline, response);
-  // Send close_notify best-effort; never wait for the peer to acknowledge shutdown.
-  SSL_shutdown(ssl.get());
+  std::string Raw;
+  WipeString WipeRaw{Raw};
+  readHttpTls(Ssl.get(), Deadline, Raw);
+  auto Request = parseHttpRequest(Raw);
+  WipeString WipeBody{Request.Body};
+  auto Response = httpResponseText(Service.handle(Request));
+  writeHttpTls(Ssl.get(), Deadline, Response);
+  // Send close_notify best-effort; never wait for the peer to acknowledge
+  // shutdown.
+  SSL_shutdown(Ssl.get());
 }
 
 // Isolate client failures while keeping the listener and its resources scoped.
-int serve_tls(SSL_CTX* ctx, UnlockService& service, const std::string& bind_host, int port,
-              int max_requests) {
-  std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> context(ctx, SSL_CTX_free);
-  BlockSigpipe block_sigpipe;
-  ScopedFd listener(bind_tls_listener(bind_host, port));
-  int handled = 0;
-  while (max_requests < 0 || handled < max_requests) {
-    ScopedFd client(accept_cloexec(listener.get()));
-    if (client.get() < 0) {
+static int serveTls(SSL_CTX *Ctx, UnlockService &Service,
+                    const std::string &BindHost, int Port, int MaxRequests) {
+  std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> Context(Ctx, SSL_CTX_free);
+  BlockSigpipe BlockSigpipe;
+  ScopedFd Listener(bindTlsListener(BindHost, Port));
+  int Handled = 0;
+  while (MaxRequests < 0 || Handled < MaxRequests) {
+    ScopedFd Client(acceptCloexec(Listener.get()));
+    if (Client.get() < 0) {
       if (errno == EINTR)
         continue;
-      throw sys_error("accept");
+      throw sysError("accept");
     }
     try {
-      serve_tls_client(context.get(), client.get(), service);
-    } catch (const std::exception&) {
-      // Drop malformed or stalled clients without logging request plaintext.
+      serveTlsClient(Context.get(), Client.get(), Service);
+      // A dropped client must not reveal why it was dropped, and the
+      // request body may hold a master password, so nothing is logged.
+      // NOLINTNEXTLINE(bugprone-empty-catch)
+    } catch (const std::exception &) {
     }
-    ++handled;
+    ++Handled;
     // Stop the bootstrap server immediately after its one-time setup completes.
-    if (service.finished())
+    if (Service.finished())
       break;
   }
-  return handled;
+  return Handled;
 }
 
-SSL_CTX* new_server_context() {
-  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
-  if (ctx == nullptr)
+static SSL_CTX *newServerContext() {
+  SSL_CTX *Ctx = SSL_CTX_new(TLS_server_method());
+  if (Ctx == nullptr)
     throw CryptoError("SSL_CTX_new failed");
   // Fail closed rather than silently permitting an older TLS protocol.
-  if (SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION) != 1) {
-    SSL_CTX_free(ctx);
+  if (SSL_CTX_set_min_proto_version(Ctx, TLS1_3_VERSION) != 1) {
+    SSL_CTX_free(Ctx);
     throw CryptoError("TLS minimum version failed");
   }
   // Keep each TLS connection fresh and disable replayable early data.
-  SSL_CTX_set_session_cache_mode(ctx, SSL_SESS_CACHE_OFF);
-  SSL_CTX_set_num_tickets(ctx, 0);
-  SSL_CTX_set_max_early_data(ctx, 0);
-  SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
-  return ctx;
+  SSL_CTX_set_session_cache_mode(Ctx, SSL_SESS_CACHE_OFF);
+  SSL_CTX_set_num_tickets(Ctx, 0);
+  SSL_CTX_set_max_early_data(Ctx, 0);
+  SSL_CTX_set_options(Ctx, SSL_OP_NO_COMPRESSION);
+  return Ctx;
 }
 
-}  // namespace
-
-int run_https_unlock_server(UnlockService& service, const std::string& bind_host, int port,
-                            const std::filesystem::path& certificate_path,
-                            const std::filesystem::path& private_key_path, int max_requests) {
-  SSL_CTX* ctx = new_server_context();
-  if (SSL_CTX_use_certificate_file(ctx, certificate_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
-      SSL_CTX_use_PrivateKey_file(ctx, private_key_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
-      SSL_CTX_check_private_key(ctx) != 1) {
-    SSL_CTX_free(ctx);
+int alfie::runHttpsUnlockServer(UnlockService &Service,
+                                const std::string &BindHost, int Port,
+                                const std::filesystem::path &CertificatePath,
+                                const std::filesystem::path &PrivateKeyPath,
+                                int MaxRequests) {
+  SSL_CTX *Ctx = newServerContext();
+  if (SSL_CTX_use_certificate_file(Ctx, CertificatePath.c_str(),
+                                   SSL_FILETYPE_PEM) != 1 ||
+      SSL_CTX_use_PrivateKey_file(Ctx, PrivateKeyPath.c_str(),
+                                  SSL_FILETYPE_PEM) != 1 ||
+      SSL_CTX_check_private_key(Ctx) != 1) {
+    SSL_CTX_free(Ctx);
     throw CryptoError("TLS certificate/private key load failed");
   }
-  return serve_tls(ctx, service, bind_host, port, max_requests);
+  return serveTls(Ctx, Service, BindHost, Port, MaxRequests);
 }
 
-int run_https_unlock_server_in_memory(UnlockService& service, const std::string& bind_host,
-                                      int port, const std::string& certificate_pem,
-                                      const SecureBuffer& private_key_pem, int max_requests) {
-  SSL_CTX* ctx = new_server_context();
+int alfie::runHttpsUnlockServerInMemory(UnlockService &Service,
+                                        const std::string &BindHost, int Port,
+                                        const std::string &CertificatePem,
+                                        const SecureBuffer &PrivateKeyPem,
+                                        int MaxRequests) {
+  SSL_CTX *Ctx = newServerContext();
 
-  BIO* cert_bio = BIO_new_mem_buf(certificate_pem.data(), static_cast<int>(certificate_pem.size()));
-  X509* cert =
-      cert_bio == nullptr ? nullptr : PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
-  BIO* key_bio = BIO_new_mem_buf(private_key_pem.data(), static_cast<int>(private_key_pem.size()));
-  EVP_PKEY* key =
-      key_bio == nullptr ? nullptr : PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
+  BIO *CertBio = BIO_new_mem_buf(CertificatePem.data(),
+                                 static_cast<int>(CertificatePem.size()));
+  X509 *Cert = CertBio == nullptr
+                   ? nullptr
+                   : PEM_read_bio_X509(CertBio, nullptr, nullptr, nullptr);
+  BIO *KeyBio = BIO_new_mem_buf(PrivateKeyPem.data(),
+                                static_cast<int>(PrivateKeyPem.size()));
+  EVP_PKEY *Key = KeyBio == nullptr ? nullptr
+                                    : PEM_read_bio_PrivateKey(KeyBio, nullptr,
+                                                              nullptr, nullptr);
 
-  const bool loaded = cert != nullptr && key != nullptr &&
-                      SSL_CTX_use_certificate(ctx, cert) == 1 &&
-                      SSL_CTX_use_PrivateKey(ctx, key) == 1 && SSL_CTX_check_private_key(ctx) == 1;
+  const bool Loaded = Cert != nullptr && Key != nullptr &&
+                      SSL_CTX_use_certificate(Ctx, Cert) == 1 &&
+                      SSL_CTX_use_PrivateKey(Ctx, Key) == 1 &&
+                      SSL_CTX_check_private_key(Ctx) == 1;
 
-  X509_free(cert);
-  EVP_PKEY_free(key);
-  BIO_free(cert_bio);
-  BIO_free(key_bio);
+  X509_free(Cert);
+  EVP_PKEY_free(Key);
+  BIO_free(CertBio);
+  BIO_free(KeyBio);
 
-  if (!loaded) {
-    SSL_CTX_free(ctx);
+  if (!Loaded) {
+    SSL_CTX_free(Ctx);
     throw CryptoError("in-memory TLS certificate/private key load failed");
   }
-  return serve_tls(ctx, service, bind_host, port, max_requests);
+  return serveTls(Ctx, Service, BindHost, Port, MaxRequests);
 }
-
-}  // namespace alfie

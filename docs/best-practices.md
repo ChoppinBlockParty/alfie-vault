@@ -37,8 +37,8 @@ Resolved from the previous "must improve next" list:
    passphrase and plaintext on a production path. `SecureBuffer` holds `SecureBytes` -- a vector
    over `SecureAllocator`, so its storage is locked and wiped by the allocator itself rather than
    by a destructor that a reallocation can outrun. The `std::string` overloads survive only as
-   test fixtures and are marked as such in `vault.hpp`.
-2. **OpenSSL secure heap.** `init_process_memory_protections()` calls
+   test fixtures and are marked as such in `vault.h`.
+2. **OpenSSL secure heap.** `initProcessMemoryProtections()` calls
    `CRYPTO_secure_malloc_init()` at process start and every secret allocation is served from
    that arena. This also removes a hazard in the old per-buffer `mlock`: locks are page-granular,
    so two secrets sharing a page shared a lock and freeing one would unlock the other. The arena
@@ -74,12 +74,12 @@ Found while validating the rules above, and fixed:
 
 ## Must improve next
 
-1. Wire `UnlockService::handle_submit` to the encrypted IPC layer. It still records only
+1. Wire `UnlockService::handleSubmit` to the encrypted IPC layer. It still records only
    delivery metadata, so the browser-worker handoff is unimplemented.
 2. Re-store records written before the `ALFIECHUNK2` change. They remain readable, but until
    they are rewritten they carry the V1 AAD and are still swappable.
 3. Verify that the secure arena is actually resident: `CRYPTO_secure_malloc_init` reports
-   success even where its internal `mlock` was refused, so `secure_heap == true` is weaker than
+   success even where its internal `mlock` was refused, so `SecureHeap == true` is weaker than
    "locked". Strict mode should probe this rather than trust the flag.
 4. The IPC `ReplayGuard` keeps every `(token, nonce)` pair it has ever seen in memory, with no
    eviction -- an unbounded growth path in a long-running server.

@@ -74,4 +74,4 @@ by comparing its fingerprint with the value printed on the box's terminal.
 
 ## Next integration
 
-Replace the temporary metadata-only delivery in `UnlockService::handle_submit` with the encrypted Unix-socket IPC browser-worker delivery from `ipc_crypto.hpp` and `ipc_transport.hpp`.
+Replace the temporary metadata-only delivery in `UnlockService::handleSubmit` with the encrypted Unix-socket IPC browser-worker delivery from `ipc_crypto.h` and `ipc_transport.h`.

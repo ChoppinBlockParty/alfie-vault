@@ -1,85 +1,95 @@
+//===----------------------------------------------------------------------===//
+/// \file
+/// Exercise ipc crypto behavior and failure paths.
+//===----------------------------------------------------------------------===//
+
+#include "../src/ipc_crypto.h"
 #include <cassert>
 #include <iostream>
 #include <string>
 #include <type_traits>
 
-#include "../src/ipc_crypto.hpp"
-
 using namespace alfie;
 
-static void test_keypairs_are_move_only_and_public_keys_are_x25519_size() {
+static void testKeypairsAreMoveOnlyAndPublicKeysAreX25519Size() {
   static_assert(!std::is_copy_constructible_v<IpcKeyPair>);
   static_assert(!std::is_copy_assignable_v<IpcKeyPair>);
 
-  auto server = generate_ipc_keypair();
-  auto client = generate_ipc_keypair();
-  assert(server.public_key.size() == 32);
-  assert(client.public_key.size() == 32);
-  assert(server.private_key.size() == 32);
-  assert(client.private_key.size() == 32);
+  auto Server = generateIpcKeypair();
+  auto Client = generateIpcKeypair();
+  assert(Server.PublicKey.size() == 32);
+  assert(Client.PublicKey.size() == 32);
+  assert(Server.PrivateKey.size() == 32);
+  assert(Client.PrivateKey.size() == 32);
 }
 
-static void test_x25519_hkdf_session_key_matches_on_both_sides() {
-  auto server = generate_ipc_keypair();
-  auto client = generate_ipc_keypair();
-  IpcRequestContext ctx{"one-time-token", "example.com", "fill_password"};
+static void testX25519HkdfSessionKeyMatchesOnBothSides() {
+  auto Server = generateIpcKeypair();
+  auto Client = generateIpcKeypair();
+  IpcRequestContext Ctx{"one-time-token", "example.com", "fill_password"};
 
-  auto server_key = derive_ipc_session_key(server.private_key, client.public_key, ctx);
-  auto client_key = derive_ipc_session_key(client.private_key, server.public_key, ctx);
+  auto ServerKey =
+      deriveIpcSessionKey(Server.PrivateKey, Client.PublicKey, Ctx);
+  auto ClientKey =
+      deriveIpcSessionKey(Client.PrivateKey, Server.PublicKey, Ctx);
 
-  assert(server_key.size() == 32);
-  assert(server_key.str() == client_key.str());
+  assert(ServerKey.size() == 32);
+  assert(ServerKey.str() == ClientKey.str());
 }
 
-static void test_ipc_encrypts_secret_and_decrypts_once() {
-  auto server = generate_ipc_keypair();
-  auto client = generate_ipc_keypair();
-  IpcRequestContext ctx{"one-time-token", "example.com", "fill_password"};
-  auto sender_key = derive_ipc_session_key(server.private_key, client.public_key, ctx);
-  auto receiver_key = derive_ipc_session_key(client.private_key, server.public_key, ctx);
-  SecureBuffer secret(R"({"secret":"VERY-SECRET-IPC"})");
+static void testIpcEncryptsSecretAndDecryptsOnce() {
+  auto Server = generateIpcKeypair();
+  auto Client = generateIpcKeypair();
+  IpcRequestContext Ctx{"one-time-token", "example.com", "fill_password"};
+  auto SenderKey =
+      deriveIpcSessionKey(Server.PrivateKey, Client.PublicKey, Ctx);
+  auto ReceiverKey =
+      deriveIpcSessionKey(Client.PrivateKey, Server.PublicKey, Ctx);
+  SecureBuffer Secret(R"({"secret":"VERY-SECRET-IPC"})");
 
-  auto frame = encrypt_ipc_message(sender_key, ctx, secret);
-  std::string raw(frame.ciphertext_and_tag.begin(), frame.ciphertext_and_tag.end());
-  assert(raw.find("VERY-SECRET-IPC") == std::string::npos);
+  auto Frame = encryptIpcMessage(SenderKey, Ctx, Secret);
+  std::string Raw(Frame.CiphertextAndTag.begin(), Frame.CiphertextAndTag.end());
+  assert(Raw.find("VERY-SECRET-IPC") == std::string::npos);
 
-  ReplayGuard guard;
-  auto decrypted = decrypt_ipc_message(receiver_key, ctx, frame, guard);
-  assert(decrypted.str() == R"({"secret":"VERY-SECRET-IPC"})");
+  ReplayGuard Guard;
+  auto Decrypted = decryptIpcMessage(ReceiverKey, Ctx, Frame, Guard);
+  assert(Decrypted.str() == R"({"secret":"VERY-SECRET-IPC"})");
 
-  bool replay_rejected = false;
+  bool ReplayRejected = false;
   try {
-    (void)decrypt_ipc_message(receiver_key, ctx, frame, guard);
-  } catch (const CryptoError&) {
-    replay_rejected = true;
+    (void)decryptIpcMessage(ReceiverKey, Ctx, Frame, Guard);
+  } catch (const CryptoError &) {
+    ReplayRejected = true;
   }
-  assert(replay_rejected);
+  assert(ReplayRejected);
 }
 
-static void test_ipc_aad_binds_token_domain_and_action() {
-  auto server = generate_ipc_keypair();
-  auto client = generate_ipc_keypair();
-  IpcRequestContext ctx{"token-a", "example.com", "fill_password"};
-  auto sender_key = derive_ipc_session_key(server.private_key, client.public_key, ctx);
-  auto receiver_key = derive_ipc_session_key(client.private_key, server.public_key, ctx);
-  SecureBuffer secret("secret");
-  auto frame = encrypt_ipc_message(sender_key, ctx, secret);
+static void testIpcAadBindsTokenDomainAndAction() {
+  auto Server = generateIpcKeypair();
+  auto Client = generateIpcKeypair();
+  IpcRequestContext Ctx{"token-a", "example.com", "fill_password"};
+  auto SenderKey =
+      deriveIpcSessionKey(Server.PrivateKey, Client.PublicKey, Ctx);
+  auto ReceiverKey =
+      deriveIpcSessionKey(Client.PrivateKey, Server.PublicKey, Ctx);
+  SecureBuffer Secret("secret");
+  auto Frame = encryptIpcMessage(SenderKey, Ctx, Secret);
 
-  ReplayGuard guard;
-  bool failed = false;
+  ReplayGuard Guard;
+  bool Failed = false;
   try {
-    IpcRequestContext tampered{"token-a", "evil.example", "fill_password"};
-    (void)decrypt_ipc_message(receiver_key, tampered, frame, guard);
-  } catch (const CryptoError&) {
-    failed = true;
+    IpcRequestContext Tampered{"token-a", "evil.example", "fill_password"};
+    (void)decryptIpcMessage(ReceiverKey, Tampered, Frame, Guard);
+  } catch (const CryptoError &) {
+    Failed = true;
   }
-  assert(failed);
+  assert(Failed);
 }
 
 int main() {
-  test_keypairs_are_move_only_and_public_keys_are_x25519_size();
-  test_x25519_hkdf_session_key_matches_on_both_sides();
-  test_ipc_encrypts_secret_and_decrypts_once();
-  test_ipc_aad_binds_token_domain_and_action();
+  testKeypairsAreMoveOnlyAndPublicKeysAreX25519Size();
+  testX25519HkdfSessionKeyMatchesOnBothSides();
+  testIpcEncryptsSecretAndDecryptsOnce();
+  testIpcAadBindsTokenDomainAndAction();
   std::cout << "IPC crypto tests passed\n";
 }

@@ -7,7 +7,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-add_compile_options(-Wall -Wextra -Wpedantic)
+add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    add_compile_options(-Wcovered-switch-default -Wnon-virtual-dtor)
+endif()
 
 # Dependencies: prefer the vendored third_party/ packages used on the Linux deploy box
 # (no root apt permission there); fall back to system OpenSSL/Argon2 elsewhere.
@@ -96,10 +99,55 @@ add_test(NAME https_smoke COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/http
 add_test(NAME gen_ip_cert COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_ip_cert.py)
 
 set(CLANG_TOOLS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/clang-tools")
-set(CLANG_ENV "LD_LIBRARY_PATH=${CLANG_TOOLS}/usr/lib/x86_64-linux-gnu")
-set(CLANG_FORMAT "${CLANG_TOOLS}/usr/bin/clang-format")
-set(CLANG_TIDY "${CLANG_TOOLS}/usr/bin/clang-tidy")
-file(GLOB_RECURSE CPP_SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.hpp tests/*.cpp)
+find_program(CLANG_FORMAT NAMES clang-format HINTS "${CLANG_TOOLS}/usr/bin")
+find_program(CLANG_TIDY NAMES clang-tidy HINTS "${CLANG_TOOLS}/usr/bin")
+
+foreach(TOOL clang-format clang-tidy)
+    string(TOUPPER "${TOOL}" TOOL_VAR)
+    string(REPLACE "-" "_" TOOL_VAR "${TOOL_VAR}")
+    if(NOT ${TOOL_VAR})
+        message(WARNING
+            "${TOOL} not found on PATH or in third_party/clang-tools; "
+            "the style targets that use it cannot run")
+    endif()
+endforeach()
+
+# The vendored Linux clang-tools are a relocated .deb and need their bundled
+# shared libraries on the loader path. Elsewhere the tool comes from PATH.
+set(CLANG_ENV)
+if(EXISTS "${CLANG_TOOLS}/usr/lib/x86_64-linux-gnu")
+    set(CLANG_ENV "LD_LIBRARY_PATH=${CLANG_TOOLS}/usr/lib/x86_64-linux-gnu")
+endif()
+
+# clang-tidy reads compile_commands.json, which records Apple's /usr/bin/c++
+# with no -isysroot: AppleClang resolves its own SDK implicitly, so CMake has no
+# reason to spell it out. An upstream clang-tidy has no such default and fails
+# to find <filesystem>. That failure is worse than it sounds -- clang-tidy still
+# exits non-zero, but it reports diagnostics off the garbled AST, so the output
+# names real files and lines while being wrong (a function read as a
+# badly-named variable, enums re-flagged for a base type they already have).
+# Pass the SDK explicitly so the analysis matches what the compiler saw.
+set(TIDY_EXTRA_ARGS)
+if(APPLE)
+    set(TIDY_SYSROOT "${CMAKE_OSX_SYSROOT}")
+    if(NOT TIDY_SYSROOT)
+        execute_process(COMMAND xcrun --show-sdk-path
+            OUTPUT_VARIABLE TIDY_SYSROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    endif()
+    if(TIDY_SYSROOT)
+        list(APPEND TIDY_EXTRA_ARGS
+            --extra-arg=-isysroot --extra-arg=${TIDY_SYSROOT})
+    else()
+        message(WARNING
+            "macOS SDK path not found (is xcrun available?); clang-tidy may "
+            "fail to locate standard headers and report misleading findings")
+    endif()
+endif()
+
+file(GLOB_RECURSE CPP_SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.h tests/*.cpp)
+file(GLOB_RECURSE CPP_TRANSLATION_UNITS CONFIGURE_DEPENDS src/*.cpp tests/*.cpp)
 
 add_custom_target(format
     COMMAND ${CMAKE_COMMAND} -E env ${CLANG_ENV} ${CLANG_FORMAT} -i ${CPP_SOURCES}
@@ -112,6 +160,28 @@ add_custom_target(format-check
 )
 
 add_custom_target(tidy
-    COMMAND ${CMAKE_COMMAND} -E env ${CLANG_ENV} ${CLANG_TIDY} --quiet -p ${CMAKE_BINARY_DIR} ${CPP_SOURCES}
+    COMMAND ${CMAKE_COMMAND} -E env ${CLANG_ENV} ${CLANG_TIDY} ${TIDY_EXTRA_ARGS} --quiet -p ${CMAKE_BINARY_DIR} ${CPP_TRANSLATION_UNITS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+# Restrict naming checks to translation units; their included headers are checked too.
+add_custom_target(naming-check
+    COMMAND ${CMAKE_COMMAND} -E env ${CLANG_ENV} ${CLANG_TIDY} ${TIDY_EXTRA_ARGS}
+        --quiet -p ${CMAKE_BINARY_DIR}
+        --checks=-*,readability-identifier-naming
+        --warnings-as-errors=readability-identifier-naming
+        ${CPP_TRANSLATION_UNITS}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# LLVM checks that apply to this standalone project (no LLVM/MLIR dependency).
+add_custom_target(llvm-check
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_cpp_style.py
+    COMMAND ${CMAKE_COMMAND} -E env ${CLANG_ENV} ${CLANG_TIDY} ${TIDY_EXTRA_ARGS}
+        --quiet -p ${CMAKE_BINARY_DIR}
+        --checks=-*,llvm-else-after-return,llvm-include-order,llvm-namespace-comment,llvm-prefer-static-over-anonymous-namespace,llvm-qualified-auto,readability-identifier-naming,portability-avoid-pragma-once
+        --warnings-as-errors=*
+        ${CPP_TRANSLATION_UNITS}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)
+add_custom_target(style-check DEPENDS format-check llvm-check)

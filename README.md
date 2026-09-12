@@ -29,7 +29,7 @@ login and master password and generates the local CA: see
 ## Design
 
 - Runtime vault is a directory of small encrypted records, not one big decrypted JSON.
-- Record path is derived from `HMAC(index_key, purpose/domain/account)`.
+- Record path is derived from `HMAC(IndexKey, purpose/domain/account)`.
 - Each record is decrypted alone, used through `ChunkVault::use(...)`, then wiped.
 - Export/backup can be a tarball of the encrypted vault directory.
 

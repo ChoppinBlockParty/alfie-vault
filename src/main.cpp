@@ -1,13 +1,17 @@
-#include <termios.h>
-#include <unistd.h>
+//===----------------------------------------------------------------------===//
+/// \file
+/// Expose vault setup and human-authorized HTTPS operations through the CLI.
+//===----------------------------------------------------------------------===//
 
+#include "ca.h"
+#include "http_unlock.h"
+#include "secure_memory.h"
+#include "vault.h"
 #include <cstdlib>
 #include <iostream>
 #include <string>
-
-#include "http_unlock.hpp"
-#include "secure_memory.hpp"
-#include "vault.hpp"
+#include <termios.h>
+#include <unistd.h>
 
 using alfie::ChunkVault;
 using alfie::SecureBuffer;
@@ -15,213 +19,236 @@ using alfie::SecureBytes;
 using alfie::UnlockRequestSpec;
 using alfie::UnlockService;
 
-namespace {
-
-int usage() {
-  std::cerr
-      << "Usage:\n"
-      << "  alfie-vault init-vault <vault-dir> <login>\n"
-      << "  alfie-vault put-account <vault-dir> <domain> <username>\n"
-      << "  alfie-vault get-account <vault-dir> <domain> <username>\n"
-      << "  alfie-vault serve-init-tls <vault-dir> <server-ip> <host> <port> <output-dir>\n"
-      << "  alfie-vault serve-unlock-tls <vault-dir> <login> <host> <port> <cert> <key> "
-         "<purpose> <domain> <account> <action>\n"
-      << "  alfie-vault serve-store-tls <vault-dir> <login> <host> <port> <cert> <key> "
-         "<purpose> <domain> <account> <action>\n"
-      << "\n"
-      << "Secrets are read from stdin, never from argv: argv is visible process-wide via\n"
-      << "/proc and ps. init-vault and put-account read the master password as the first line\n"
-      << "of stdin; put-account reads the record payload from the rest.\n"
-      << "\n"
-      << "Environment:\n"
-      << "  ALFIE_VAULT_STRICT_MEMORY=1          fail closed if secret memory cannot be\n"
-      << "                                       locked or core dumps cannot be disabled\n"
-      << "  ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1 required by get-account, which prints a\n"
-      << "                                       decrypted record (test fixtures only)\n";
+static int usage() {
+  std::cerr << "Usage:\n"
+            << "  alfie-vault init-vault <vault-dir> <login>\n"
+            << "  alfie-vault put-account <vault-dir> <domain> <username>\n"
+            << "  alfie-vault get-account <vault-dir> <domain> <username>\n"
+            << "  alfie-vault serve-init-tls <vault-dir> <server-ip> <host> "
+               "<port> <output-dir>\n"
+            << "  alfie-vault serve-unlock-tls <vault-dir> <login> <host> "
+               "<port> <cert> <key> "
+               "<purpose> <domain> <account> <action>\n"
+            << "  alfie-vault serve-store-tls <vault-dir> <login> <host> "
+               "<port> <cert> <key> "
+               "<purpose> <domain> <account> <action>\n"
+            << "\n"
+            << "Secrets are read from stdin, never from argv: argv is visible "
+               "process-wide via\n"
+            << "/proc and ps. init-vault and put-account read the master "
+               "password as the first line\n"
+            << "of stdin; put-account reads the record payload from the rest.\n"
+            << "\n"
+            << "Environment:\n"
+            << "  ALFIE_VAULT_STRICT_MEMORY=1          fail closed if secret "
+               "memory cannot be\n"
+            << "                                       locked or core dumps "
+               "cannot be disabled\n"
+            << "  ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1 required by "
+               "get-account, which prints a\n"
+            << "                                       decrypted record (test "
+               "fixtures only)\n";
   return 2;
 }
 
-bool env_flag(const char* name) {
-  const char* value = std::getenv(name);
-  return value != nullptr && std::string(value) == "1";
+static bool envFlag(const char *Name) {
+  const char *Value = std::getenv(Name);
+  return Value != nullptr && std::string(Value) == "1";
 }
 
-// Reads one line from stdin into secure memory. Echo is disabled when stdin is a terminal.
-// The bytes never pass through a std::string, so no plaintext copy is left on the normal heap.
-SecureBuffer read_secret_line(const char* prompt) {
-  const bool tty = isatty(STDIN_FILENO) != 0;
-  termios saved{};
-  bool echo_disabled = false;
-  if (tty) {
-    std::cerr << prompt << std::flush;
-    if (tcgetattr(STDIN_FILENO, &saved) == 0) {
-      termios quiet = saved;
-      quiet.c_lflag &= static_cast<tcflag_t>(~ECHO);
-      echo_disabled = tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet) == 0;
+// Reads one line from stdin into secure memory. Echo is disabled when stdin is
+// a terminal. The bytes never pass through a std::string, so no plaintext copy
+// is left on the normal heap.
+static SecureBuffer readSecretLine(const char *Prompt) {
+  const bool Tty = isatty(STDIN_FILENO) != 0;
+  termios Saved{};
+  bool EchoDisabled = false;
+  if (Tty) {
+    std::cerr << Prompt << std::flush;
+    if (tcgetattr(STDIN_FILENO, &Saved) == 0) {
+      termios Quiet = Saved;
+      Quiet.c_lflag &= static_cast<tcflag_t>(~ECHO);
+      EchoDisabled = tcsetattr(STDIN_FILENO, TCSAFLUSH, &Quiet) == 0;
     }
   }
 
-  SecureBytes bytes;
-  char c = 0;
-  while (std::cin.get(c)) {
-    if (c == '\n')
+  SecureBytes Bytes;
+  char C = 0;
+  while (std::cin.get(C)) {
+    if (C == '\n')
       break;
-    bytes.push_back(static_cast<unsigned char>(c));
+    Bytes.push_back(static_cast<unsigned char>(C));
   }
-  if (!bytes.empty() && bytes.back() == '\r')
-    bytes.pop_back();
+  if (!Bytes.empty() && Bytes.back() == '\r')
+    Bytes.pop_back();
 
-  if (echo_disabled) {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved);
+  if (EchoDisabled) {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &Saved);
     std::cerr << "\n";
   }
-  return SecureBuffer(std::move(bytes));
+  return SecureBuffer(std::move(Bytes));
 }
 
 // Reads the remainder of stdin into secure memory.
-SecureBuffer read_secret_rest() {
-  SecureBytes bytes;
-  char c = 0;
-  while (std::cin.get(c))
-    bytes.push_back(static_cast<unsigned char>(c));
-  while (!bytes.empty() && (bytes.back() == '\n' || bytes.back() == '\r'))
-    bytes.pop_back();
-  return SecureBuffer(std::move(bytes));
+static SecureBuffer readSecretRest() {
+  SecureBytes Bytes;
+  char C = 0;
+  while (std::cin.get(C))
+    Bytes.push_back(static_cast<unsigned char>(C));
+  while (!Bytes.empty() && (Bytes.back() == '\n' || Bytes.back() == '\r'))
+    Bytes.pop_back();
+  return SecureBuffer(std::move(Bytes));
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-  if (argc < 2)
+int main(int Argc, char **Argv) {
+  if (Argc < 2)
     return usage();
-  std::string cmd = argv[1];
   try {
-    // Before any secret is read: lock the secure heap in place and make core dumps impossible.
-    alfie::init_process_memory_protections(env_flag("ALFIE_VAULT_STRICT_MEMORY")
-                                               ? alfie::MemoryPolicy::Strict
-                                               : alfie::MemoryPolicy::BestEffort);
+    std::string Cmd = Argv[1];
+    // Before any secret is read: lock the secure heap in place and make core
+    // dumps impossible.
+    alfie::initProcessMemoryProtections(envFlag("ALFIE_VAULT_STRICT_MEMORY")
+                                            ? alfie::MemoryPolicy::Strict
+                                            : alfie::MemoryPolicy::BestEffort);
 
-    if (cmd == "init-vault") {
-      if (argc != 4)
+    if (Cmd == "init-vault") {
+      if (Argc != 4)
         return usage();
-      SecureBuffer passphrase = read_secret_line("New master password: ");
-      alfie::init_vault(argv[2], argv[3], passphrase);
-      std::cout << "vault initialized " << argv[2] << "\n";
+      SecureBuffer Passphrase = readSecretLine("New master password: ");
+      alfie::initVault(Argv[2], Argv[3], Passphrase);
+      std::cout << "vault initialized " << Argv[2] << "\n";
       return 0;
     }
-    if (cmd == "put-account") {
-      if (argc != 5)
+    if (Cmd == "put-account") {
+      if (Argc != 5)
         return usage();
-      SecureBuffer passphrase = read_secret_line("Master password: ");
-      SecureBuffer payload = read_secret_rest();
-      ChunkVault vault(argv[2]);
-      auto path = vault.put("account", argv[3], argv[4], passphrase, payload);
-      std::cout << "stored " << path << "\n";
+      SecureBuffer Passphrase = readSecretLine("Master password: ");
+      SecureBuffer Payload = readSecretRest();
+      ChunkVault Vault(Argv[2]);
+      auto Path = Vault.put("account", Argv[3], Argv[4], Passphrase, Payload);
+      std::cout << "stored " << Path << "\n";
       return 0;
     }
-    if (cmd == "get-account") {
-      if (argc != 5)
+    if (Cmd == "get-account") {
+      if (Argc != 5)
         return usage();
-      // Printing a decrypted record to stdout is a test fixture, not a delivery path: stdout
-      // lands in scrollback, pipes and logs. The production path is the HTTPS unlock server.
-      if (!env_flag("ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT")) {
-        std::cerr << "error: get-account prints a decrypted record and is for test fixtures "
-                     "only.\nSet ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1 to confirm, or use "
+      // Printing a decrypted record to stdout is a test fixture, not a delivery
+      // path: stdout lands in scrollback, pipes and logs. The production path
+      // is the HTTPS unlock server.
+      if (!envFlag("ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT")) {
+        std::cerr << "error: get-account prints a decrypted record and is for "
+                     "test fixtures "
+                     "only.\nSet ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1 to "
+                     "confirm, or use "
                      "serve-unlock-tls.\n";
         return 2;
       }
-      SecureBuffer passphrase = read_secret_line("Master password: ");
-      ChunkVault vault(argv[2]);
-      vault.use("account", argv[3], argv[4], passphrase, [](const SecureBuffer& secret) {
-        std::cout.write(reinterpret_cast<const char*>(secret.data()),
-                        static_cast<std::streamsize>(secret.size()));
-        std::cout << "\n";
-      });
+      SecureBuffer Passphrase = readSecretLine("Master password: ");
+      ChunkVault Vault(Argv[2]);
+      Vault.use("account", Argv[3], Argv[4], Passphrase,
+                [](const SecureBuffer &Secret) {
+                  std::cout.write(reinterpret_cast<const char *>(Secret.data()),
+                                  static_cast<std::streamsize>(Secret.size()));
+                  std::cout << "\n";
+                });
       return 0;
     }
-    if (cmd == "serve-init-tls") {
-      if (argc != 7)
+    if (Cmd == "serve-init-tls") {
+      if (Argc != 7)
         return usage();
-      const std::filesystem::path vault_dir = argv[2];
-      const std::string server_ip = argv[3];
-      const std::string bind_host = argv[4];
-      const int port = std::stoi(argv[5]);
-      const std::filesystem::path output_dir = argv[6];
+      const std::filesystem::path VaultDir = Argv[2];
+      const std::string ServerIp = Argv[3];
+      const std::string BindHost = Argv[4];
+      const int Port = std::stoi(Argv[5]);
+      const std::filesystem::path OutputDir = Argv[6];
 
-      // Refuse to even start against a live vault. The setup page must be unreachable whenever
-      // a vault exists, not merely fail once someone has typed a password into it.
-      if (alfie::vault_initialized(vault_dir)) {
-        std::cerr << "error: vault already initialized at " << vault_dir << "\n"
-                  << "First-time setup can only run once. Nothing was served.\n";
+      // Refuse to even start against a live vault. The setup page must be
+      // unreachable whenever a vault exists, not merely fail once someone has
+      // typed a password into it.
+      if (alfie::vaultInitialized(VaultDir)) {
+        std::cerr
+            << "error: vault already initialized at " << VaultDir << "\n"
+            << "First-time setup can only run once. Nothing was served.\n";
         return 1;
       }
 
-      // One-off certificate: generated in memory, never written to disk, discarded on exit.
-      alfie::GeneratedCertificate ephemeral = alfie::generate_ephemeral_certificate(bind_host);
-      const std::string fingerprint =
-          alfie::certificate_fingerprint_sha256(ephemeral.certificate_pem);
+      // One-off certificate: generated in memory, never written to disk,
+      // discarded on exit.
+      alfie::GeneratedCertificate Ephemeral =
+          alfie::generateEphemeralCertificate(BindHost);
+      const std::string Fingerprint =
+          alfie::certificateFingerprintSha256(Ephemeral.CertificatePem);
 
-      UnlockService service(vault_dir, "");
-      service.set_transport_fingerprint(fingerprint);
-      alfie::InitPlan plan;
-      plan.output_dir = output_dir;
-      plan.server_ip = server_ip;
-      UnlockRequestSpec spec{"init", "", "", "init_vault"};
-      auto token = service.create_init_token(spec, plan);
+      UnlockService Service(VaultDir, "");
+      Service.setTransportFingerprint(Fingerprint);
+      alfie::InitPlan Plan;
+      Plan.OutputDir = OutputDir;
+      Plan.ServerIp = ServerIp;
+      UnlockRequestSpec Spec{"init", "", "", "init_vault"};
+      auto Token = Service.createInitToken(Spec, Plan);
 
-      // The setup secret goes only to the trusted terminal, never into the link or page.
+      // The setup secret goes only to the trusted terminal, never into the link
+      // or page.
       std::cout << "  One-time setup code: ";
-      const auto& setup_code = service.setup_code(token);
-      std::cout.write(reinterpret_cast<const char*>(setup_code.data()), setup_code.size());
+      const auto &SetupCode = Service.setupCode(Token);
+      std::cout.write(reinterpret_cast<const char *>(SetupCode.data()),
+                      SetupCode.size());
       std::cout << "\n";
 
-      std::cout << "\n"
-                << "==========================================================\n"
-                << "  FIRST-TIME VAULT SETUP - this runs exactly once\n"
-                << "==========================================================\n"
-                << "\n"
-                << "Your browser will warn that this certificate is untrusted.\n"
-                << "That is expected: no CA exists yet. Before typing anything,\n"
-                << "check that the browser shows this exact fingerprint.\n"
-                << "\n"
-                << "  Request code: " << service.request_code(token) << "\n"
-                << "  SHA-256: " << fingerprint << "\n"
-                << "\n"
-                << "The setup page shows the same value. If they differ, you are\n"
-                << "not talking to this server - close the page.\n"
-                << "\n"
-                << "setup link: https://" << bind_host << ":" << port << "/init/" << token << "\n"
-                << "\n"
-                << std::flush;
+      std::cout
+          << "\n"
+          << "==========================================================\n"
+          << "  FIRST-TIME VAULT SETUP - this runs exactly once\n"
+          << "==========================================================\n"
+          << "\n"
+          << "Your browser will warn that this certificate is untrusted.\n"
+          << "That is expected: no CA exists yet. Before typing anything,\n"
+          << "check that the browser shows this exact fingerprint.\n"
+          << "\n"
+          << "  Request code: " << Service.requestCode(Token) << "\n"
+          << "  SHA-256: " << Fingerprint << "\n"
+          << "\n"
+          << "The setup page shows the same value. If they differ, you are\n"
+          << "not talking to this server - close the page.\n"
+          << "\n"
+          << "setup link: https://" << BindHost << ":" << Port << "/init/"
+          << Token << "\n"
+          << "\n"
+          << std::flush;
 
-      return alfie::run_https_unlock_server_in_memory(
-          service, bind_host, port, ephemeral.certificate_pem, ephemeral.private_key_pem);
+      return alfie::runHttpsUnlockServerInMemory(Service, BindHost, Port,
+                                                 Ephemeral.CertificatePem,
+                                                 Ephemeral.PrivateKeyPem);
     }
-    if (cmd == "serve-unlock-tls") {
-      if (argc != 12)
+    if (Cmd == "serve-unlock-tls") {
+      if (Argc != 12)
         return usage();
-      UnlockService service(argv[2], argv[3]);
-      UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
-      auto token = service.create_token(spec);
-      std::cout << "unlock link: https://" << argv[4] << ":" << argv[5] << "/unlock/" << token
-                << "\nRequest code: " << service.request_code(token) << "\n"
+      UnlockService Service(Argv[2], Argv[3]);
+      UnlockRequestSpec Spec{Argv[8], Argv[9], Argv[10], Argv[11]};
+      auto Token = Service.createToken(Spec);
+      std::cout << "unlock link: https://" << Argv[4] << ":" << Argv[5]
+                << "/unlock/" << Token
+                << "\nRequest code: " << Service.requestCode(Token) << "\n"
                 << std::flush;
-      return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
+      return alfie::runHttpsUnlockServer(Service, Argv[4], std::stoi(Argv[5]),
+                                         Argv[6], Argv[7]);
     }
-    if (cmd == "serve-store-tls") {
-      if (argc != 12)
+    if (Cmd == "serve-store-tls") {
+      if (Argc != 12)
         return usage();
-      UnlockService service(argv[2], argv[3]);
-      UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
-      auto token = service.create_store_token(spec);
-      std::cout << "store link: https://" << argv[4] << ":" << argv[5] << "/store/" << token << "\n"
-                << "Request code: " << service.request_code(token) << "\n"
+      UnlockService Service(Argv[2], Argv[3]);
+      UnlockRequestSpec Spec{Argv[8], Argv[9], Argv[10], Argv[11]};
+      auto Token = Service.createStoreToken(Spec);
+      std::cout << "store link: https://" << Argv[4] << ":" << Argv[5]
+                << "/store/" << Token << "\n"
+                << "Request code: " << Service.requestCode(Token) << "\n"
                 << std::flush;
-      return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
+      return alfie::runHttpsUnlockServer(Service, Argv[4], std::stoi(Argv[5]),
+                                         Argv[6], Argv[7]);
     }
     return usage();
-  } catch (const std::exception& e) {
-    std::cerr << "error: " << e.what() << "\n";
+  } catch (const std::exception &E) {
+    std::cerr << "error: " << E.what() << "\n";
     return 1;
   }
 }

@@ -1,4 +1,9 @@
 Checks: >
+  llvm-else-after-return,
+  llvm-include-order,
+  llvm-namespace-comment,
+  llvm-prefer-static-over-anonymous-namespace,
+  llvm-qualified-auto,
   bugprone-*,
   performance-*,
   portability-*,
@@ -10,12 +15,32 @@ Checks: >
   -readability-braces-around-statements,
   -readability-function-cognitive-complexity,
   -readability-identifier-length,
-  -readability-identifier-naming,
   -readability-implicit-bool-conversion,
   -readability-inconsistent-declaration-parameter-name,
   -readability-isolate-declaration,
   -readability-magic-numbers
-WarningsAsErrors: ''
+WarningsAsErrors: 'llvm-*,readability-identifier-naming,portability-avoid-pragma-once'
 HeaderFilterRegex: 'src/.*|tests/.*'
 SystemHeaders: false
 FormatStyle: file
+
+# LLVM/Clang naming. Standard-library protocol names must keep their spelling.
+CheckOptions:
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.TypeAliasCase: CamelCase
+  readability-identifier-naming.TypeAliasIgnoredRegexp: '^value_type$'
+  readability-identifier-naming.TypedefCase: CamelCase
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: CamelCase
+  readability-identifier-naming.EnumCase: CamelCase
+  readability-identifier-naming.EnumConstantCase: CamelCase
+  readability-identifier-naming.FunctionCase: camelBack
+  readability-identifier-naming.MethodCase: camelBack
+  readability-identifier-naming.VariableCase: CamelCase
+  readability-identifier-naming.ParameterCase: CamelCase
+  readability-identifier-naming.MemberCase: CamelCase
+  readability-identifier-naming.ConstantCase: CamelCase
+  readability-identifier-naming.TemplateParameterCase: CamelCase
+
+# llvm-header-guard assumes LLVM's checkout layout. The local style script
+# checks guards against this project's actual include paths instead.

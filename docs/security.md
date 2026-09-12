@@ -15,14 +15,14 @@ no master password, could otherwise make an unlock hand a task the wrong credent
 readable, and a rewrite upgrades them in place (the stale V1 file is removed). Until they are
 rewritten they remain swappable, so re-store anything written before this change.
 
-Record ids also changed: the field separator in `HMAC(index_key, purpose \0 domain \0 account)`
+Record ids also changed: the field separator in `HMAC(IndexKey, purpose \0 domain \0 account)`
 was being dropped, because `a + "\0" + b` decays to a C string and `strlen` stops at the NUL.
 Ids are now genuinely NUL-separated, and lookups fall back to the old id so existing vaults keep
 resolving.
 
 ## Memory protections
 
-`init_process_memory_protections()` runs before any secret is read. It initializes the OpenSSL
+`initProcessMemoryProtections()` runs before any secret is read. It initializes the OpenSSL
 secure heap -- one arena, locked as a unit, that serves every secret allocation -- and sets
 `RLIMIT_CORE` to 0. `ALFIE_VAULT_STRICT_MEMORY=1` makes both mandatory: the process refuses to
 start rather than hold a master password it cannot protect. The default is best-effort.
@@ -48,7 +48,7 @@ the local CA in memory, and stores the CA private key inside the vault. The setu
 under a one-off certificate whose fingerprint is printed on the box's terminal for out-of-band
 comparison, and it is styled red so it cannot be mistaken for a routine unlock.
 
-The setup server refuses to start once a vault exists, and `init_vault` throws if `vault.meta` is
+The setup server refuses to start once a vault exists, and `initVault` throws if `vault.meta` is
 present, so an init link can never re-key a live vault. See `docs/first-time-init.md`.
 
 The residual risk is phishing, not forgery: an attacker who stands up their own empty vault and
@@ -69,7 +69,7 @@ Include `vault.meta`; records cannot be found or decrypted without the vault sal
 
 - Unix IPC requires a trusted absolute path without symlinks, a UID-owned `0700` directory,
   and a `0600` socket. Existing entries are never replaced; stale sockets require explicit cleanup.
-- `accept_secure_unix_socket` verifies the peer UID. IPC descriptors are nonblocking and
+- `acceptSecureUnixSocket` verifies the peer UID. IPC descriptors are nonblocking and
   close-on-exec; callers manage readiness and lifetime. Browser-worker delivery remains unwired.
 - HTTPS network I/O has a 10-second deadline, 16 KiB header limit, and 1 MiB request limit.
   Malformed or disconnected clients are isolated; request buffers are wiped on exit.

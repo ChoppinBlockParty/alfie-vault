@@ -11,3 +11,4 @@ certs/
 *.deb
 third_party/clang-tools/
 third_party/ninja/
+.cache/

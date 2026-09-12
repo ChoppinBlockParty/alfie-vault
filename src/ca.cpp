@@ -1,257 +1,270 @@
-#include "ca.hpp"
+//===----------------------------------------------------------------------===//
+/// \file
+/// Generate X.509 certificates and keep private keys in secure memory.
+//===----------------------------------------------------------------------===//
 
+#include "ca.h"
 #include <fcntl.h>
+#include <fstream>
+#include <iomanip>
+#include <memory>
 #include <openssl/bn.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/x509v3.h>
+#include <sstream>
 #include <unistd.h>
 
-#include <fstream>
-#include <iomanip>
-#include <memory>
-#include <sstream>
+using namespace alfie;
 
-namespace alfie {
 namespace {
-
 struct X509Deleter {
-  void operator()(X509* p) const {
-    X509_free(p);
-  }
+  void operator()(X509 *P) const { X509_free(P); }
 };
 struct PkeyDeleter {
-  void operator()(EVP_PKEY* p) const {
-    EVP_PKEY_free(p);
-  }
+  void operator()(EVP_PKEY *P) const { EVP_PKEY_free(P); }
 };
 struct BioDeleter {
-  void operator()(BIO* p) const {
-    BIO_free(p);
-  }
+  void operator()(BIO *P) const { BIO_free(P); }
 };
 struct NameDeleter {
-  void operator()(X509_NAME* p) const {
-    X509_NAME_free(p);
-  }
+  void operator()(X509_NAME *P) const { X509_NAME_free(P); }
 };
+} // namespace
 
 using X509Ptr = std::unique_ptr<X509, X509Deleter>;
 using PkeyPtr = std::unique_ptr<EVP_PKEY, PkeyDeleter>;
 using BioPtr = std::unique_ptr<BIO, BioDeleter>;
 
-PkeyPtr generate_rsa_key(int bits) {
-  PkeyPtr key(EVP_RSA_gen(static_cast<unsigned int>(bits)));
-  if (!key)
+static PkeyPtr generateRsaKey(int Bits) {
+  PkeyPtr Key(EVP_RSA_gen(static_cast<unsigned int>(Bits)));
+  if (!Key)
     throw CryptoError("RSA key generation failed");
-  return key;
+  return Key;
 }
 
-void set_random_serial(X509* cert) {
-  unsigned char bytes[16];
-  if (RAND_bytes(bytes, sizeof(bytes)) != 1)
+static void setRandomSerial(X509 *Cert) {
+  unsigned char Bytes[16];
+  if (RAND_bytes(Bytes, sizeof(Bytes)) != 1)
     throw CryptoError("RAND_bytes failed");
-  bytes[0] &= 0x7F;  // keep the serial positive
-  std::unique_ptr<BIGNUM, void (*)(BIGNUM*)> bn(BN_bin2bn(bytes, sizeof(bytes), nullptr),
-                                                [](BIGNUM* p) { BN_free(p); });
-  if (!bn)
+  Bytes[0] &= 0x7F; // keep the serial positive
+  std::unique_ptr<BIGNUM, void (*)(BIGNUM *)> Bn(
+      BN_bin2bn(Bytes, sizeof(Bytes), nullptr), [](BIGNUM *P) { BN_free(P); });
+  if (!Bn)
     throw CryptoError("serial generation failed");
-  if (BN_to_ASN1_INTEGER(bn.get(), X509_get_serialNumber(cert)) == nullptr)
+  if (BN_to_ASN1_INTEGER(Bn.get(), X509_get_serialNumber(Cert)) == nullptr)
     throw CryptoError("serial conversion failed");
 }
 
-void set_common_name(X509_NAME* name, const std::string& common_name) {
-  if (X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                                 reinterpret_cast<const unsigned char*>(common_name.c_str()), -1,
-                                 -1, 0) != 1) {
+static void setCommonName(X509_NAME *Name, const std::string &CommonName) {
+  if (X509_NAME_add_entry_by_txt(
+          Name, "CN", MBSTRING_ASC,
+          reinterpret_cast<const unsigned char *>(CommonName.c_str()), -1, -1,
+          0) != 1) {
     throw CryptoError("cannot set certificate common name");
   }
 }
 
-void add_extension(X509* cert, X509* issuer, int nid, const std::string& value) {
-  X509V3_CTX ctx;
-  X509V3_set_ctx_nodb(&ctx);
-  X509V3_set_ctx(&ctx, issuer, cert, nullptr, nullptr, 0);
-  X509_EXTENSION* ext = X509V3_EXT_conf_nid(nullptr, &ctx, nid, value.c_str());
-  if (ext == nullptr)
+static void addExtension(X509 *Cert, X509 *Issuer, int Nid,
+                         const std::string &Value) {
+  X509V3_CTX Ctx;
+  X509V3_set_ctx_nodb(&Ctx);
+  X509V3_set_ctx(&Ctx, Issuer, Cert, nullptr, nullptr, 0);
+  X509_EXTENSION *Ext = X509V3_EXT_conf_nid(nullptr, &Ctx, Nid, Value.c_str());
+  if (Ext == nullptr)
     throw CryptoError("cannot build certificate extension");
-  const int rc = X509_add_ext(cert, ext, -1);
-  X509_EXTENSION_free(ext);
-  if (rc != 1)
+  const int Rc = X509_add_ext(Cert, Ext, -1);
+  X509_EXTENSION_free(Ext);
+  if (Rc != 1)
     throw CryptoError("cannot add certificate extension");
 }
 
-std::string pem_from_certificate(X509* cert) {
-  BioPtr bio(BIO_new(BIO_s_mem()));
-  if (!bio || PEM_write_bio_X509(bio.get(), cert) != 1)
+static std::string pemFromCertificate(X509 *Cert) {
+  BioPtr Bio(BIO_new(BIO_s_mem()));
+  if (!Bio || PEM_write_bio_X509(Bio.get(), Cert) != 1)
     throw CryptoError("cannot encode certificate");
-  char* data = nullptr;
-  const long len = BIO_get_mem_data(bio.get(), &data);
-  return std::string(data, static_cast<size_t>(len));
+  char *Data = nullptr;
+  const long Len = BIO_get_mem_data(Bio.get(), &Data);
+  return std::string(Data, static_cast<size_t>(Len));
 }
 
-// The private key leaves OpenSSL only as bytes inside a SecureBuffer, and the BIO that held the
-// PEM is cleansed before it is freed.
-SecureBuffer secure_pem_from_key(EVP_PKEY* key) {
-  BioPtr bio(BIO_new(BIO_s_mem()));
-  if (!bio || PEM_write_bio_PrivateKey(bio.get(), key, nullptr, nullptr, 0, nullptr, nullptr) != 1)
+// The private key leaves OpenSSL only as bytes inside a SecureBuffer, and the
+// BIO that held the PEM is cleansed before it is freed.
+static SecureBuffer securePemFromKey(EVP_PKEY *Key) {
+  BioPtr Bio(BIO_new(BIO_s_mem()));
+  if (!Bio || PEM_write_bio_PrivateKey(Bio.get(), Key, nullptr, nullptr, 0,
+                                       nullptr, nullptr) != 1)
     throw CryptoError("cannot encode private key");
-  char* data = nullptr;
-  const long len = BIO_get_mem_data(bio.get(), &data);
-  SecureBuffer out(std::vector<unsigned char>(data, data + len));
-  OPENSSL_cleanse(data, static_cast<size_t>(len));
-  return out;
+  char *Data = nullptr;
+  const long Len = BIO_get_mem_data(Bio.get(), &Data);
+  SecureBuffer Out(std::vector<unsigned char>(Data, Data + Len));
+  OPENSSL_cleanse(Data, static_cast<size_t>(Len));
+  return Out;
 }
 
-X509Ptr certificate_from_pem(const std::string& pem) {
-  BioPtr bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
-  if (!bio)
+static X509Ptr certificateFromPem(const std::string &Pem) {
+  BioPtr Bio(BIO_new_mem_buf(Pem.data(), static_cast<int>(Pem.size())));
+  if (!Bio)
     throw CryptoError("cannot read certificate");
-  X509Ptr cert(PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr));
-  if (!cert)
+  X509Ptr Cert(PEM_read_bio_X509(Bio.get(), nullptr, nullptr, nullptr));
+  if (!Cert)
     throw CryptoError("cannot parse certificate");
-  return cert;
+  return Cert;
 }
 
-PkeyPtr key_from_secure_pem(const SecureBuffer& pem) {
-  BioPtr bio(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())));
-  if (!bio)
+static PkeyPtr keyFromSecurePem(const SecureBuffer &Pem) {
+  BioPtr Bio(BIO_new_mem_buf(Pem.data(), static_cast<int>(Pem.size())));
+  if (!Bio)
     throw CryptoError("cannot read private key");
-  PkeyPtr key(PEM_read_bio_PrivateKey(bio.get(), nullptr, nullptr, nullptr));
-  if (!key)
+  PkeyPtr Key(PEM_read_bio_PrivateKey(Bio.get(), nullptr, nullptr, nullptr));
+  if (!Key)
     throw CryptoError("cannot parse private key");
-  return key;
+  return Key;
 }
 
-X509Ptr new_certificate(EVP_PKEY* subject_key, const std::string& common_name, int days) {
-  X509Ptr cert(X509_new());
-  if (!cert)
+static X509Ptr newCertificate(EVP_PKEY *SubjectKey,
+                              const std::string &CommonName, int Days) {
+  X509Ptr Cert(X509_new());
+  if (!Cert)
     throw CryptoError("X509_new failed");
-  if (X509_set_version(cert.get(), 2) != 1)  // v3
+  if (X509_set_version(Cert.get(), 2) != 1) // v3
     throw CryptoError("cannot set certificate version");
-  set_random_serial(cert.get());
-  if (X509_gmtime_adj(X509_getm_notBefore(cert.get()), 0) == nullptr ||
-      X509_gmtime_adj(X509_getm_notAfter(cert.get()), 60L * 60L * 24L * days) == nullptr) {
+  setRandomSerial(Cert.get());
+  if (X509_gmtime_adj(X509_getm_notBefore(Cert.get()), 0) == nullptr ||
+      X509_gmtime_adj(X509_getm_notAfter(Cert.get()), 60L * 60L * 24L * Days) ==
+          nullptr) {
     throw CryptoError("cannot set certificate validity");
   }
-  if (X509_set_pubkey(cert.get(), subject_key) != 1)
+  if (X509_set_pubkey(Cert.get(), SubjectKey) != 1)
     throw CryptoError("cannot set certificate public key");
-  set_common_name(X509_get_subject_name(cert.get()), common_name);
-  return cert;
+  setCommonName(X509_get_subject_name(Cert.get()), CommonName);
+  return Cert;
 }
 
-}  // namespace
-
-GeneratedCertificate generate_ca_certificate(const std::string& common_name, int days,
-                                             int rsa_bits) {
-  PkeyPtr key = generate_rsa_key(rsa_bits);
-  X509Ptr cert = new_certificate(key.get(), common_name, days);
+GeneratedCertificate alfie::generateCaCertificate(const std::string &CommonName,
+                                                  int Days, int RsaBits) {
+  PkeyPtr Key = generateRsaKey(RsaBits);
+  X509Ptr Cert = newCertificate(Key.get(), CommonName, Days);
 
   // Self-signed: issuer is its own subject.
-  if (X509_set_issuer_name(cert.get(), X509_get_subject_name(cert.get())) != 1)
+  if (X509_set_issuer_name(Cert.get(), X509_get_subject_name(Cert.get())) != 1)
     throw CryptoError("cannot set CA issuer");
-  add_extension(cert.get(), cert.get(), NID_basic_constraints, "critical,CA:TRUE");
-  add_extension(cert.get(), cert.get(), NID_key_usage, "critical,keyCertSign,cRLSign");
-  add_extension(cert.get(), cert.get(), NID_subject_key_identifier, "hash");
+  addExtension(Cert.get(), Cert.get(), NID_basic_constraints,
+               "critical,CA:TRUE");
+  addExtension(Cert.get(), Cert.get(), NID_key_usage,
+               "critical,keyCertSign,cRLSign");
+  addExtension(Cert.get(), Cert.get(), NID_subject_key_identifier, "hash");
 
-  if (X509_sign(cert.get(), key.get(), EVP_sha256()) == 0)
+  if (X509_sign(Cert.get(), Key.get(), EVP_sha256()) == 0)
     throw CryptoError("cannot self-sign CA certificate");
 
-  return GeneratedCertificate{pem_from_certificate(cert.get()), secure_pem_from_key(key.get())};
+  return GeneratedCertificate{pemFromCertificate(Cert.get()),
+                              securePemFromKey(Key.get())};
 }
 
-GeneratedCertificate issue_ip_certificate(const std::string& ip_address,
-                                          const std::string& ca_certificate_pem,
-                                          const SecureBuffer& ca_private_key_pem, int days,
-                                          int rsa_bits) {
-  X509Ptr ca_cert = certificate_from_pem(ca_certificate_pem);
-  PkeyPtr ca_key = key_from_secure_pem(ca_private_key_pem);
+GeneratedCertificate alfie::issueIpCertificate(
+    const std::string &IpAddress, const std::string &CaCertificatePem,
+    const SecureBuffer &CaPrivateKeyPem, int Days, int RsaBits) {
+  X509Ptr CaCert = certificateFromPem(CaCertificatePem);
+  PkeyPtr CaKey = keyFromSecurePem(CaPrivateKeyPem);
 
-  PkeyPtr key = generate_rsa_key(rsa_bits);
-  X509Ptr cert = new_certificate(key.get(), ip_address, days);
+  PkeyPtr Key = generateRsaKey(RsaBits);
+  X509Ptr Cert = newCertificate(Key.get(), IpAddress, Days);
 
-  if (X509_set_issuer_name(cert.get(), X509_get_subject_name(ca_cert.get())) != 1)
+  if (X509_set_issuer_name(Cert.get(), X509_get_subject_name(CaCert.get())) !=
+      1)
     throw CryptoError("cannot set server certificate issuer");
-  add_extension(cert.get(), ca_cert.get(), NID_basic_constraints, "critical,CA:FALSE");
-  add_extension(cert.get(), ca_cert.get(), NID_key_usage,
-                "critical,digitalSignature,keyEncipherment");
-  add_extension(cert.get(), ca_cert.get(), NID_ext_key_usage, "serverAuth");
-  add_extension(cert.get(), ca_cert.get(), NID_subject_alt_name, "IP:" + ip_address);
-  add_extension(cert.get(), ca_cert.get(), NID_subject_key_identifier, "hash");
+  addExtension(Cert.get(), CaCert.get(), NID_basic_constraints,
+               "critical,CA:FALSE");
+  addExtension(Cert.get(), CaCert.get(), NID_key_usage,
+               "critical,digitalSignature,keyEncipherment");
+  addExtension(Cert.get(), CaCert.get(), NID_ext_key_usage, "serverAuth");
+  addExtension(Cert.get(), CaCert.get(), NID_subject_alt_name,
+               "IP:" + IpAddress);
+  addExtension(Cert.get(), CaCert.get(), NID_subject_key_identifier, "hash");
 
-  if (X509_sign(cert.get(), ca_key.get(), EVP_sha256()) == 0)
+  if (X509_sign(Cert.get(), CaKey.get(), EVP_sha256()) == 0)
     throw CryptoError("cannot sign server certificate");
 
-  return GeneratedCertificate{pem_from_certificate(cert.get()), secure_pem_from_key(key.get())};
+  return GeneratedCertificate{pemFromCertificate(Cert.get()),
+                              securePemFromKey(Key.get())};
 }
 
-GeneratedCertificate generate_ephemeral_certificate(const std::string& ip_address, int days,
-                                                    int rsa_bits) {
-  PkeyPtr key = generate_rsa_key(rsa_bits);
-  X509Ptr cert = new_certificate(key.get(), "Alfie Vault first-time setup", days);
+GeneratedCertificate
+alfie::generateEphemeralCertificate(const std::string &IpAddress, int Days,
+                                    int RsaBits) {
+  PkeyPtr Key = generateRsaKey(RsaBits);
+  X509Ptr Cert =
+      newCertificate(Key.get(), "Alfie Vault first-time setup", Days);
 
-  if (X509_set_issuer_name(cert.get(), X509_get_subject_name(cert.get())) != 1)
+  if (X509_set_issuer_name(Cert.get(), X509_get_subject_name(Cert.get())) != 1)
     throw CryptoError("cannot set issuer");
-  add_extension(cert.get(), cert.get(), NID_basic_constraints, "critical,CA:FALSE");
-  add_extension(cert.get(), cert.get(), NID_key_usage, "critical,digitalSignature,keyEncipherment");
-  add_extension(cert.get(), cert.get(), NID_ext_key_usage, "serverAuth");
-  add_extension(cert.get(), cert.get(), NID_subject_alt_name, "IP:" + ip_address);
+  addExtension(Cert.get(), Cert.get(), NID_basic_constraints,
+               "critical,CA:FALSE");
+  addExtension(Cert.get(), Cert.get(), NID_key_usage,
+               "critical,digitalSignature,keyEncipherment");
+  addExtension(Cert.get(), Cert.get(), NID_ext_key_usage, "serverAuth");
+  addExtension(Cert.get(), Cert.get(), NID_subject_alt_name, "IP:" + IpAddress);
 
-  if (X509_sign(cert.get(), key.get(), EVP_sha256()) == 0)
+  if (X509_sign(Cert.get(), Key.get(), EVP_sha256()) == 0)
     throw CryptoError("cannot sign ephemeral certificate");
 
-  return GeneratedCertificate{pem_from_certificate(cert.get()), secure_pem_from_key(key.get())};
+  return GeneratedCertificate{pemFromCertificate(Cert.get()),
+                              securePemFromKey(Key.get())};
 }
 
-std::string certificate_fingerprint_sha256(const std::string& certificate_pem) {
-  X509Ptr cert = certificate_from_pem(certificate_pem);
-  unsigned char digest[EVP_MAX_MD_SIZE];
-  unsigned int len = 0;
-  if (X509_digest(cert.get(), EVP_sha256(), digest, &len) != 1)
+std::string
+alfie::certificateFingerprintSha256(const std::string &CertificatePem) {
+  X509Ptr Cert = certificateFromPem(CertificatePem);
+  unsigned char Digest[EVP_MAX_MD_SIZE];
+  unsigned int Len = 0;
+  if (X509_digest(Cert.get(), EVP_sha256(), Digest, &Len) != 1)
     throw CryptoError("cannot compute certificate fingerprint");
 
-  std::ostringstream out;
-  for (unsigned int i = 0; i < len; ++i) {
-    if (i > 0)
-      out << ':';
-    out << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
-        << static_cast<int>(digest[i]);
+  std::ostringstream Out;
+  for (unsigned int I = 0; I < Len; ++I) {
+    if (I > 0)
+      Out << ':';
+    Out << std::uppercase << std::hex << std::setw(2) << std::setfill('0')
+        << static_cast<int>(Digest[I]);
   }
-  return out.str();
+  return Out.str();
 }
 
-void write_public_file(const std::filesystem::path& path, const std::string& contents) {
-  std::filesystem::create_directories(path.parent_path());
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  if (!out)
-    throw CryptoError("cannot write " + path.string());
-  out.write(contents.data(), static_cast<std::streamsize>(contents.size()));
-  out.flush();
-  if (!out)
-    throw CryptoError("cannot write " + path.string());
+void alfie::writePublicFile(const std::filesystem::path &Path,
+                            const std::string &Contents) {
+  std::filesystem::create_directories(Path.parent_path());
+  std::ofstream Out(Path, std::ios::binary | std::ios::trunc);
+  if (!Out)
+    throw CryptoError("cannot write " + Path.string());
+  Out.write(Contents.data(), static_cast<std::streamsize>(Contents.size()));
+  Out.flush();
+  if (!Out)
+    throw CryptoError("cannot write " + Path.string());
 }
 
-void write_private_file(const std::filesystem::path& path, const SecureBuffer& contents) {
-  std::filesystem::create_directories(path.parent_path());
-  // Created 0600 from the start: never write key material and widen permissions afterwards.
-  const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-  if (fd < 0)
-    throw CryptoError("cannot create " + path.string());
-  const unsigned char* data = contents.data();
-  size_t remaining = contents.size();
-  while (remaining > 0) {
-    const ssize_t written = ::write(fd, data, remaining);
-    if (written <= 0) {
-      ::close(fd);
-      throw CryptoError("cannot write " + path.string());
+void alfie::writePrivateFile(const std::filesystem::path &Path,
+                             const SecureBuffer &Contents) {
+  std::filesystem::create_directories(Path.parent_path());
+  // Created 0600 from the start: never write key material and widen permissions
+  // afterwards.
+  const int Fd =
+      ::open(Path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+  if (Fd < 0)
+    throw CryptoError("cannot create " + Path.string());
+  const unsigned char *Data = Contents.data();
+  size_t Remaining = Contents.size();
+  while (Remaining > 0) {
+    const ssize_t Written = ::write(Fd, Data, Remaining);
+    if (Written <= 0) {
+      ::close(Fd);
+      throw CryptoError("cannot write " + Path.string());
     }
-    data += written;
-    remaining -= static_cast<size_t>(written);
+    Data += Written;
+    Remaining -= static_cast<size_t>(Written);
   }
-  ::fsync(fd);
-  ::close(fd);
+  ::fsync(Fd);
+  ::close(Fd);
 }
-
-}  // namespace alfie

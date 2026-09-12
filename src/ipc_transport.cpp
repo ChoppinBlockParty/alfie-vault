@@ -1,153 +1,163 @@
-#include "ipc_transport.hpp"
+//===----------------------------------------------------------------------===//
+/// \file
+/// Restrict Unix socket access to the expected local user.
+//===----------------------------------------------------------------------===//
 
+#include "ipc_transport.h"
+#include "scoped_fd.h"
+#include "vault.h"
+#include <cerrno>
+#include <cstring>
 #include <fcntl.h>
+#include <iterator>
+#include <stdexcept>
+#include <string>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
-#include <cerrno>
-#include <cstring>
-#include <iterator>
-#include <stdexcept>
-#include <string>
-
-#include "scoped_fd.hpp"
-#include "vault.hpp"
-
-namespace alfie {
+using namespace alfie;
 
 #ifndef SOCK_CLOEXEC
 #define SOCK_CLOEXEC 0
 #endif
 
-namespace {
-std::runtime_error sys_error(const std::string& what) {
-  return std::runtime_error(what + ": " + std::strerror(errno));
+static std::runtime_error sysError(const std::string &What) {
+  return std::runtime_error(What + ": " + std::strerror(errno));
 }
 
 // Fail closed if the directory could be replaced or accessed by another user.
-void validate_runtime_directory(int fd, bool is_runtime_dir) {
-  struct stat info{};
-  if (fstat(fd, &info) != 0)
-    throw sys_error("stat runtime component");
-  if (is_runtime_dir) {
-    if (info.st_uid != geteuid() || (info.st_mode & 07777) != 0700)
-      throw std::runtime_error("runtime directory requires effective UID ownership and mode 0700");
+static void validateRuntimeDirectory(int Fd, bool IsRuntimeDir) {
+  struct stat Info{};
+  if (fstat(Fd, &Info) != 0)
+    throw sysError("stat runtime component");
+  if (IsRuntimeDir) {
+    if (Info.st_uid != geteuid() || (Info.st_mode & 07777) != 0700)
+      throw std::runtime_error(
+          "runtime directory requires effective UID ownership and mode 0700");
     return;
   }
 
   // Root-owned sticky directories allow safe private children under /tmp.
-  bool trusted_owner = info.st_uid == 0 || info.st_uid == geteuid();
-  bool publicly_writable = info.st_mode & 0022;
-  bool root_sticky = info.st_uid == 0 && (info.st_mode & S_ISVTX);
-  if (!trusted_owner || (publicly_writable && !root_sticky))
+  bool TrustedOwner = Info.st_uid == 0 || Info.st_uid == geteuid();
+  bool PubliclyWritable = Info.st_mode & 0022;
+  bool RootSticky = Info.st_uid == 0 && (Info.st_mode & S_ISVTX);
+  if (!TrustedOwner || (PubliclyWritable && !RootSticky))
     throw std::runtime_error("untrusted runtime ancestor");
 }
 
-// Prevent descriptor inheritance and blocking IPC operations on all supported platforms.
-void configure_unix_socket(int fd) {
-  if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || fcntl(fd, F_SETFL, O_NONBLOCK) != 0)
-    throw sys_error("configure unix socket");
+// Prevent descriptor inheritance and blocking IPC operations on all supported
+// platforms.
+static void configureUnixSocket(int Fd) {
+  if (fcntl(Fd, F_SETFD, FD_CLOEXEC) != 0 ||
+      fcntl(Fd, F_SETFL, O_NONBLOCK) != 0)
+    throw sysError("configure unix socket");
 }
-}  // namespace
 
-// Walk through directory descriptors so symlinks cannot redirect runtime creation.
-std::filesystem::path make_private_runtime_dir(const std::filesystem::path& dir) {
-  if (!dir.is_absolute() || dir.string().find('\0') != std::string::npos || dir == dir.root_path())
-    throw std::runtime_error("runtime directory must be an absolute non-root path");
-  ScopedFd current(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-  if (current.get() < 0)
-    throw sys_error("open runtime root");
+// Walk through directory descriptors so symlinks cannot redirect runtime
+// creation.
+std::filesystem::path
+alfie::makePrivateRuntimeDir(const std::filesystem::path &Dir) {
+  if (!Dir.is_absolute() || Dir.string().find('\0') != std::string::npos ||
+      Dir == Dir.root_path())
+    throw std::runtime_error(
+        "runtime directory must be an absolute non-root path");
+  ScopedFd Current(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  if (Current.get() < 0)
+    throw sysError("open runtime root");
 
-  auto relative = dir.relative_path();
-  for (auto it = relative.begin(); it != relative.end(); ++it) {
-    const auto name = it->string();
-    if (name.empty() || name == "." || name == "..")
+  auto Relative = Dir.relative_path();
+  for (auto It = Relative.begin(); It != Relative.end(); ++It) {
+    const auto Name = It->string();
+    if (Name.empty() || Name == "." || Name == "..")
       throw std::runtime_error("invalid runtime path component");
     // Restrict new directories at creation; never repair existing permissions.
-    if (mkdirat(current.get(), name.c_str(), 0700) != 0 && errno != EEXIST)
-      throw sys_error("mkdir runtime component");
-    int next = openat(current.get(), name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (next < 0)
-      throw sys_error("open runtime component");
-    current.reset(next);
-    validate_runtime_directory(current.get(), std::next(it) == relative.end());
+    if (mkdirat(Current.get(), Name.c_str(), 0700) != 0 && errno != EEXIST)
+      throw sysError("mkdir runtime component");
+    int Next = openat(Current.get(), Name.c_str(),
+                      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (Next < 0)
+      throw sysError("open runtime component");
+    Current.reset(Next);
+    validateRuntimeDirectory(Current.get(), std::next(It) == Relative.end());
   }
-  return dir;
+  return Dir;
 }
 
-int bind_secure_unix_socket(const std::filesystem::path& socket_path) {
+int alfie::bindSecureUnixSocket(const std::filesystem::path &SocketPath) {
   // Reject NUL truncation and pathname overflow before touching the filesystem.
-  const std::string path = socket_path.string();
-  sockaddr_un addr{};
-  if (path.find('\0') != std::string::npos || path.size() >= sizeof(addr.sun_path) ||
-      socket_path.filename().empty())
+  const std::string Path = SocketPath.string();
+  sockaddr_un Addr{};
+  if (Path.find('\0') != std::string::npos ||
+      Path.size() >= sizeof(Addr.sun_path) || SocketPath.filename().empty())
     throw std::runtime_error("invalid socket path");
-  make_private_runtime_dir(socket_path.parent_path());
+  makePrivateRuntimeDir(SocketPath.parent_path());
   // Binding fails on existing entries; never delete another listener or file.
-  ScopedFd socket_fd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
-  if (socket_fd.get() < 0)
-    throw sys_error("socket");
-  configure_unix_socket(socket_fd.get());
-  addr.sun_family = AF_UNIX;
-  std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
-  if (bind(socket_fd.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0)
-    throw sys_error("bind");
+  ScopedFd SocketFd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+  if (SocketFd.get() < 0)
+    throw sysError("socket");
+  configureUnixSocket(SocketFd.get());
+  Addr.sun_family = AF_UNIX;
+  std::memcpy(Addr.sun_path, Path.c_str(), Path.size() + 1);
+  if (bind(SocketFd.get(), reinterpret_cast<sockaddr *>(&Addr), sizeof(Addr)) !=
+      0)
+    throw sysError("bind");
   // The enclosing 0700 directory protects the socket before chmod completes.
-  if (chmod(path.c_str(), 0600) != 0)
-    throw sys_error("chmod socket");
-  if (listen(socket_fd.get(), 16) != 0)
-    throw sys_error("listen");
-  return socket_fd.release();
+  if (chmod(Path.c_str(), 0600) != 0)
+    throw sysError("chmod socket");
+  if (listen(SocketFd.get(), 16) != 0)
+    throw sysError("listen");
+  return SocketFd.release();
 }
 
 // Authenticate the peer before handing its connection to the caller.
-int accept_secure_unix_socket(int listener, uid_t expected_uid) {
+int alfie::acceptSecureUnixSocket(int Listener, uid_t ExpectedUid) {
 #ifdef __linux__
-  ScopedFd client(accept4(listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK));
+  ScopedFd Client(
+      accept4(Listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK));
 #else
-  ScopedFd client(accept(listener, nullptr, nullptr));
+  ScopedFd Client(accept(Listener, nullptr, nullptr));
 #endif
-  if (client.get() < 0)
-    throw sys_error("accept unix socket");
-  configure_unix_socket(client.get());
-  if (peer_uid(client.get()) != expected_uid)
+  if (Client.get() < 0)
+    throw sysError("accept unix socket");
+  configureUnixSocket(Client.get());
+  if (peerUid(Client.get()) != ExpectedUid)
     throw CryptoError("unauthorized Unix socket peer");
-  return client.release();
+  return Client.release();
 }
 
-uid_t peer_uid(int connected_unix_socket_fd) {
+uid_t alfie::peerUid(int ConnectedUnixSocketFd) {
   // Reject listeners and non-Unix sockets before interpreting peer credentials.
-  sockaddr_storage address{};
-  socklen_t address_len = sizeof(address);
-  int type = 0;
-  socklen_t type_len = sizeof(type);
-  if (getpeername(connected_unix_socket_fd, reinterpret_cast<sockaddr*>(&address), &address_len) !=
-          0 ||
-      getsockopt(connected_unix_socket_fd, SOL_SOCKET, SO_TYPE, &type, &type_len) != 0)
-    throw sys_error("inspect unix peer");
-  if (address.ss_family != AF_UNIX || type != SOCK_STREAM)
+  sockaddr_storage Address{};
+  socklen_t AddressLen = sizeof(Address);
+  int Type = 0;
+  socklen_t TypeLen = sizeof(Type);
+  if (getpeername(ConnectedUnixSocketFd, reinterpret_cast<sockaddr *>(&Address),
+                  &AddressLen) != 0 ||
+      getsockopt(ConnectedUnixSocketFd, SOL_SOCKET, SO_TYPE, &Type, &TypeLen) !=
+          0)
+    throw sysError("inspect unix peer");
+  if (Address.ss_family != AF_UNIX || Type != SOCK_STREAM)
     throw CryptoError("peer must be a connected Unix stream socket");
 #ifdef __linux__
   // Read identity from the kernel rather than trusting client-supplied data.
-  ucred cred{};
-  socklen_t len = sizeof(cred);
-  if (getsockopt(connected_unix_socket_fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
-    throw sys_error("SO_PEERCRED");
+  ucred Cred{};
+  socklen_t Len = sizeof(Cred);
+  if (getsockopt(ConnectedUnixSocketFd, SOL_SOCKET, SO_PEERCRED, &Cred, &Len) !=
+      0) {
+    throw sysError("SO_PEERCRED");
   }
-  if (len != sizeof(cred))
+  if (Len != sizeof(Cred))
     throw std::runtime_error("invalid peer credential length");
-  return cred.uid;
+  return Cred.uid;
 #else
   // macOS/BSD have no SO_PEERCRED; getpeereid(3) is the equivalent.
-  uid_t uid = 0;
-  gid_t gid = 0;
-  if (getpeereid(connected_unix_socket_fd, &uid, &gid) != 0) {
-    throw sys_error("getpeereid");
+  uid_t Uid = 0;
+  gid_t Gid = 0;
+  if (getpeereid(ConnectedUnixSocketFd, &Uid, &Gid) != 0) {
+    throw sysError("getpeereid");
   }
-  return uid;
+  return Uid;
 #endif
 }
-
-}  // namespace alfie

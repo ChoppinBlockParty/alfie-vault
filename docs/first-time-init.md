@@ -70,7 +70,7 @@ trust. Only the second one lives in the vault.
 - **Typed twice.** A typo would otherwise become an unrecoverable vault.
 - **Login must not be empty.**
 - **One-time token**, like every other link.
-- **Never re-runnable.** `init_vault` throws if the vault exists, so an init link can never
+- **Never re-runnable.** `initVault` throws if the vault exists, so an init link can never
   re-key a live vault or overwrite existing records.
 
 ## After setup

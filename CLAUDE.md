@@ -31,6 +31,7 @@ make all          # configure + build into build/
 make test         # build, then ctest --output-on-failure
 make format       # clang-format -i over src/ and tests/
 make format-check # fails on unformatted code
+make naming-check # enforce LLVM/Clang identifier naming
 make tidy         # clang-tidy against build/compile_commands.json
 make clean
 ```
@@ -53,26 +54,25 @@ This repo was developed on a Linux x86_64 box without root package-install permi
 dependencies are vendored under `third_party/` and hardcoded in `CMakeLists.txt` for that platform:
 
 - `third_party/argon2/usr/lib/x86_64-linux-gnu` (checked in), `third_party/libssl-dev/usr/include`
-- `third_party/ninja/` and `third_party/clang-tools/` are **gitignored** — the build, `format`, and
-  `tidy` targets all fail until those local tool packages are extracted there.
+- `third_party/ninja/` and `third_party/clang-tools/` are **gitignored**. Build helpers prefer
+  those tools when available and otherwise look on PATH.
 
-On a different platform (e.g. macOS/arm64) the vendored paths do not apply; expect to adjust
-`CMakeLists.txt`'s `find_library`/include paths rather than assuming the build is broken.
+On other platforms (e.g. macOS/arm64), CMake discovers system OpenSSL and Argon2.
 
 ## Architecture
 
 `src/` builds one static lib (`alfie_vault_core`) plus a thin CLI (`src/main.cpp`). Five layers:
 
-**0. `secure_memory.{hpp,cpp}` — process memory protections.** The OpenSSL secure heap,
+**0. `secure_memory.{h,cpp}` — process memory protections.** The OpenSSL secure heap,
 `RLIMIT_CORE`, the strict/best-effort policy, and `SecureAllocator`. Call
-`init_process_memory_protections()` before reading any secret.
+`initProcessMemoryProtections()` before reading any secret.
 
-**1. `vault.{hpp,cpp}` — the chunk vault.** A vault is a *directory of independently encrypted
+**1. `vault.{h,cpp}` — the chunk vault.** A vault is a *directory of independently encrypted
 records*, never one decrypted blob. `vault.meta` (`ALFIEVAULT2` + random 32-byte salt + Argon2id
 cost params + two HMAC credential verifiers) is created on first write; Argon2id (m=64 MiB, t=3, p=1) over that salt derives a
 64-byte secret split into an **index key** and a **record key**. The record path is
-`records/<id[0:2]>/<id[2:4]>/<id>.enc` where `id = HMAC-SHA256(index_key, purpose \0
-normalize_domain(domain) \0 account)` with real NUL separators — so domains and usernames never
+`records/<id[0:2]>/<id[2:4]>/<id>.enc` where `id = HMAC-SHA256(IndexKey, purpose \0
+normalizeDomain(domain) \0 account)` with real NUL separators — so domains and usernames never
 appear in filenames. Record file layout is `ALFIECHUNK2\n` magic + 16-byte salt (reserved) +
 12-byte nonce + AES-256-GCM ciphertext/tag, with **magic + record id + salt** as GCM AAD. Binding
 the id is what stops record files being swapped between accounts by anyone with write access to
@@ -85,37 +85,37 @@ be raised for new vaults without orphaning existing ones.
 `SecureBuffer` is the memory discipline: move-only, and backed by `SecureBytes` — a vector over
 `SecureAllocator`, which serves from the OpenSSL secure heap (one arena, locked as a unit) and
 wipes on free. The wipe belongs to the allocator, not a destructor, so a container that grows
-cannot leave a readable copy in the abandoned block. `secure_memory.hpp` also owns the
+cannot leave a readable copy in the abandoned block. `secure_memory.h` also owns the
 process-level protections: secure-heap init, `RLIMIT_CORE` 0, and `MemoryPolicy::Strict`
 (`ALFIE_VAULT_STRICT_MEMORY=1`), which fails closed instead of degrading. `VaultKeys` is move-only
-for the same reason, and `derive_keys` wipes the passphrase buffer as soon as Argon2id returns.
+for the same reason, and `deriveKeys` wipes the passphrase buffer as soon as Argon2id returns.
 
 `VaultSession` is the production entry point: it runs Argon2id **once**, wipes the passphrase,
 verifies login + master password against the stored verifiers, and holds the derived keys only
 for that one request. Prefer it over `ChunkVault`, which cannot check a login.
 
-**2. `ipc_crypto.{hpp,cpp}` — the encrypted envelope.** Ephemeral X25519 → HKDF-SHA256 session key;
+**2. `ipc_crypto.{h,cpp}` — the encrypted envelope.** Ephemeral X25519 → HKDF-SHA256 session key;
 `IpcRequestContext{token, domain, action}` is bound as HKDF info and GCM AAD, so a frame is only
 valid for the one token/domain/action it was minted for. `ReplayGuard` rejects reused
 `(token, nonce)` pairs. Decrypted payloads come back as `SecureBuffer`.
 
-**3. `ipc_transport.{hpp,cpp}` — the socket guard.** Unix domain socket only: `0700` runtime dir,
+**3. `ipc_transport.{h,cpp}` — the socket guard.** Unix domain socket only: `0700` runtime dir,
 `0600` socket, peer UID verified via `SO_PEERCRED`. Deliberately separate from the crypto layer.
 
-**4. `http_unlock.{hpp,cpp}` — the one-time web server.** This is the layer that implements the
+**4. `http_unlock.{h,cpp}` — the one-time web server.** This is the layer that implements the
 primary use case above. Hand-rolled HTTP parsing and a small OpenSSL TLS server (no framework).
 `UnlockService` mints single-use, TTL-bound tokens in three modes (`UnlockMode`) — `/init/<token>`
 (first-time setup), `/unlock/<token>` (decrypt one record), `/store/<token>` (encrypt a pasted
-secret). A token is minted for exactly one mode and rejected on any other path; `live_token()` is
+secret). A token is minted for exactly one mode and rejected on any other path; `liveToken()` is
 the single place that checks existence, `used`, mode match and expiry, on both GET and POST.
-Pages are mobile-friendly inline HTML. `handle_submit` records only metadata in `last_delivery_`
+Pages are mobile-friendly inline HTML. `handleSubmit` records only metadata in `LastDelivery`
 (token/domain/account/action/secret size) for the unlock path — wiring that to the encrypted IPC
 layer above is the intended next step.
 
-**5. `ca.{hpp,cpp}` — in-memory X.509.** Generates the CA, CA-signed IP server certificates, and
+**5. `ca.{h,cpp}` — in-memory X.509.** Generates the CA, CA-signed IP server certificates, and
 the one-off setup certificate. Private keys are never serialized to disk by this module: they
 exist as an `EVP_PKEY` inside the call and leave only as PEM bytes in a `SecureBuffer`, so callers
-can put them straight into the vault. `write_private_file()` creates 0600 files with `open(2)`
+can put them straight into the vault. `writePrivateFile()` creates 0600 files with `open(2)`
 rather than widening permissions after the fact.
 
 ### First-time setup
@@ -123,11 +123,11 @@ rather than widening permissions after the fact.
 `serve-init-tls` is the bootstrap and has rules the other paths do not. It **refuses to start**
 if `vault.meta` exists (the red page must be unreachable whenever a vault exists, not merely
 rejected after a password is typed). It serves under a one-off certificate generated in memory by
-`generate_ephemeral_certificate()` and never written to disk, prints that certificate's SHA-256
+`generateEphemeralCertificate()` and never written to disk, prints that certificate's SHA-256
 fingerprint to the terminal, and the page echoes the same value — out-of-band comparison is the
 real anti-phishing defense, since no CA is trusted yet and the user is clicking through a
 warning. On submit it creates the vault, generates the CA in memory, stores the CA private key in
-the vault, writes the CA cert plus a CA-signed server cert/key, sets `finished_`, and the serve
+the vault, writes the CA cert plus a CA-signed server cert/key, sets `Finished`, and the serve
 loop exits. See `docs/first-time-init.md`.
 
 The threat here is phishing, not forgery: re-keying a live vault is already impossible, but an
@@ -139,17 +139,17 @@ load-bearing, and the tests assert all three.
 
 - **Never widen the plaintext window.** Prefer `VaultSession::use(...)` / `ChunkVault::use(...)`
   (callback receives a `SecureBuffer`, wiped on return) over `get()`, which returns a long-lived
-  `std::string`. The `std::string` passphrase/plaintext overloads in `vault.hpp` are marked
+  `std::string`. The `std::string` passphrase/plaintext overloads in `vault.h` are marked
   test-fixture-only; production paths take `SecureBuffer`. Nothing should log, echo, or return a
   secret value; the unlock pages report success only.
 - **Keep the unlock human-gated.** There is no plaintext-HTTP server in this build: the unlock
   page carries a master password, so every `serve-*` subcommand is TLS-only. On an IP-only host
   the certificates come from first-time setup (`docs/first-time-init.md`). Tokens are single-use and TTL-bound (`UnlockRequestSpec`
   defaults to 300s) — treat both as load-bearing.
-- **The vault never springs into existence.** `init_vault()` is the only thing that creates
+- **The vault never springs into existence.** `initVault()` is the only thing that creates
   `vault.meta`, and it throws if one exists. Reads and writes call a strict meta read that throws
   when the vault is absent — a typo'd vault path must fail, not become a new empty vault. The
-  minimum master password length (`kMinimumMasterPasswordLength`) is enforced at init because the
+  minimum master password length (`MinimumMasterPasswordLength`) is enforced at init because the
   password can never be changed afterwards.
 - **No production secrets through argv.** All CLI subcommands read secrets from stdin (first line
   = master password, echo off on a TTY); argv is visible OS-wide. `get-account` prints a
@@ -159,8 +159,10 @@ load-bearing, and the tests assert all three.
   "must improve next" list (IPC delivery wiring, re-storing V1 records, probing that the secure
   arena is really resident, `ReplayGuard` growth, unlock rate-limiting); consult it before changing
   crypto or memory handling.
-- Style is Google C++ via `.clang-format` (100 cols, left pointers) with project naming:
-  `lower_case` functions/variables, `CamelCase` types, trailing `_` on private members. All code is
+- Style follows LLVM/Clang via `.clang-format` (LLVM preset: 80 columns, right-aligned pointers).
+  Functions use `lowerCamelCase`; types, variables, constants, and members use `UpperCamelCase`
+  without a private-member suffix. Standard-library protocol names such as `value_type` retain
+  their required spelling. `.clang-tidy` enforces naming with `make naming-check`. All code is
   in `namespace alfie`. Crypto/auth failures throw `alfie::CryptoError`.
 - Tests are plain `assert`-based `main()` binaries (no framework) for C++, and standalone Python
   scripts driving the shell scripts and a real TLS server for the integration tests. `openssl` and
