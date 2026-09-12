@@ -23,122 +23,122 @@ using namespace alfie;
 #define SOCK_CLOEXEC 0
 #endif
 
-static std::runtime_error sysError(const std::string &What) {
-  return std::runtime_error(What + ": " + std::strerror(errno));
+static std::runtime_error sysError(const std::string &what) {
+  return std::runtime_error(what + ": " + std::strerror(errno));
 }
 
 // Fail closed if the directory could be replaced or accessed by another user.
-static void validateRuntimeDirectory(int Fd, bool IsRuntimeDir) {
-  struct stat Info{};
-  if (fstat(Fd, &Info) != 0)
+static void validateRuntimeDirectory(int fd, bool isRuntimeDir) {
+  struct stat info{};
+  if (fstat(fd, &info) != 0)
     throw sysError("stat runtime component");
-  if (IsRuntimeDir) {
-    if (Info.st_uid != geteuid() || (Info.st_mode & 07777) != 0700)
+  if (isRuntimeDir) {
+    if (info.st_uid != geteuid() || (info.st_mode & 07777) != 0700)
       throw std::runtime_error(
           "runtime directory requires effective UID ownership and mode 0700");
     return;
   }
 
   // Root-owned sticky directories allow safe private children under /tmp.
-  bool TrustedOwner = Info.st_uid == 0 || Info.st_uid == geteuid();
-  bool PubliclyWritable = Info.st_mode & 0022;
-  bool RootSticky = Info.st_uid == 0 && (Info.st_mode & S_ISVTX);
-  if (!TrustedOwner || (PubliclyWritable && !RootSticky))
+  bool trustedOwner = info.st_uid == 0 || info.st_uid == geteuid();
+  bool publiclyWritable = info.st_mode & 0022;
+  bool rootSticky = info.st_uid == 0 && (info.st_mode & S_ISVTX);
+  if (!trustedOwner || (publiclyWritable && !rootSticky))
     throw std::runtime_error("untrusted runtime ancestor");
 }
 
 // Prevent descriptor inheritance and blocking IPC operations on all supported
 // platforms.
-static void configureUnixSocket(int Fd) {
-  if (fcntl(Fd, F_SETFD, FD_CLOEXEC) != 0 ||
-      fcntl(Fd, F_SETFL, O_NONBLOCK) != 0)
+static void configureUnixSocket(int fd) {
+  if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 ||
+      fcntl(fd, F_SETFL, O_NONBLOCK) != 0)
     throw sysError("configure unix socket");
 }
 
 // Walk through directory descriptors so symlinks cannot redirect runtime
 // creation.
 std::filesystem::path
-alfie::makePrivateRuntimeDir(const std::filesystem::path &Dir) {
-  if (!Dir.is_absolute() || Dir.string().find('\0') != std::string::npos ||
-      Dir == Dir.root_path())
+alfie::makePrivateRuntimeDir(const std::filesystem::path &dir) {
+  if (!dir.is_absolute() || dir.string().find('\0') != std::string::npos ||
+      dir == dir.root_path())
     throw std::runtime_error(
         "runtime directory must be an absolute non-root path");
-  ScopedFd Current(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-  if (Current.get() < 0)
+  ScopedFd current(open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  if (current.get() < 0)
     throw sysError("open runtime root");
 
-  auto Relative = Dir.relative_path();
-  for (auto It = Relative.begin(); It != Relative.end(); ++It) {
-    const auto Name = It->string();
-    if (Name.empty() || Name == "." || Name == "..")
+  auto relative = dir.relative_path();
+  for (auto it = relative.begin(); it != relative.end(); ++it) {
+    const auto name = it->string();
+    if (name.empty() || name == "." || name == "..")
       throw std::runtime_error("invalid runtime path component");
     // Restrict new directories at creation; never repair existing permissions.
-    if (mkdirat(Current.get(), Name.c_str(), 0700) != 0 && errno != EEXIST)
+    if (mkdirat(current.get(), name.c_str(), 0700) != 0 && errno != EEXIST)
       throw sysError("mkdir runtime component");
-    int Next = openat(Current.get(), Name.c_str(),
+    int next = openat(current.get(), name.c_str(),
                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (Next < 0)
+    if (next < 0)
       throw sysError("open runtime component");
-    Current.reset(Next);
-    validateRuntimeDirectory(Current.get(), std::next(It) == Relative.end());
+    current.reset(next);
+    validateRuntimeDirectory(current.get(), std::next(it) == relative.end());
   }
-  return Dir;
+  return dir;
 }
 
-int alfie::bindSecureUnixSocket(const std::filesystem::path &SocketPath) {
+int alfie::bindSecureUnixSocket(const std::filesystem::path &socketPath) {
   // Reject NUL truncation and pathname overflow before touching the filesystem.
-  const std::string Path = SocketPath.string();
-  sockaddr_un Addr{};
-  if (Path.find('\0') != std::string::npos ||
-      Path.size() >= sizeof(Addr.sun_path) || SocketPath.filename().empty())
+  const std::string path = socketPath.string();
+  sockaddr_un addr{};
+  if (path.find('\0') != std::string::npos ||
+      path.size() >= sizeof(addr.sun_path) || socketPath.filename().empty())
     throw std::runtime_error("invalid socket path");
-  makePrivateRuntimeDir(SocketPath.parent_path());
+  makePrivateRuntimeDir(socketPath.parent_path());
   // Binding fails on existing entries; never delete another listener or file.
-  ScopedFd SocketFd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
-  if (SocketFd.get() < 0)
+  ScopedFd socketFd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+  if (socketFd.get() < 0)
     throw sysError("socket");
-  configureUnixSocket(SocketFd.get());
-  Addr.sun_family = AF_UNIX;
-  std::memcpy(Addr.sun_path, Path.c_str(), Path.size() + 1);
-  if (bind(SocketFd.get(), reinterpret_cast<sockaddr *>(&Addr), sizeof(Addr)) !=
+  configureUnixSocket(socketFd.get());
+  addr.sun_family = AF_UNIX;
+  std::memcpy(addr.sun_path, path.c_str(), path.size() + 1);
+  if (bind(socketFd.get(), reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) !=
       0)
     throw sysError("bind");
   // The enclosing 0700 directory protects the socket before chmod completes.
-  if (chmod(Path.c_str(), 0600) != 0)
+  if (chmod(path.c_str(), 0600) != 0)
     throw sysError("chmod socket");
-  if (listen(SocketFd.get(), 16) != 0)
+  if (listen(socketFd.get(), 16) != 0)
     throw sysError("listen");
-  return SocketFd.release();
+  return socketFd.release();
 }
 
 // Authenticate the peer before handing its connection to the caller.
-int alfie::acceptSecureUnixSocket(int Listener, uid_t ExpectedUid) {
+int alfie::acceptSecureUnixSocket(int listener, uid_t expectedUid) {
 #ifdef __linux__
   ScopedFd Client(
       accept4(Listener, nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK));
 #else
-  ScopedFd Client(accept(Listener, nullptr, nullptr));
+  ScopedFd client(accept(listener, nullptr, nullptr));
 #endif
-  if (Client.get() < 0)
+  if (client.get() < 0)
     throw sysError("accept unix socket");
-  configureUnixSocket(Client.get());
-  if (peerUid(Client.get()) != ExpectedUid)
+  configureUnixSocket(client.get());
+  if (peerUid(client.get()) != expectedUid)
     throw CryptoError("unauthorized Unix socket peer");
-  return Client.release();
+  return client.release();
 }
 
-uid_t alfie::peerUid(int ConnectedUnixSocketFd) {
+uid_t alfie::peerUid(int connectedUnixSocketFd) {
   // Reject listeners and non-Unix sockets before interpreting peer credentials.
-  sockaddr_storage Address{};
-  socklen_t AddressLen = sizeof(Address);
-  int Type = 0;
-  socklen_t TypeLen = sizeof(Type);
-  if (getpeername(ConnectedUnixSocketFd, reinterpret_cast<sockaddr *>(&Address),
-                  &AddressLen) != 0 ||
-      getsockopt(ConnectedUnixSocketFd, SOL_SOCKET, SO_TYPE, &Type, &TypeLen) !=
+  sockaddr_storage address{};
+  socklen_t addressLen = sizeof(address);
+  int type = 0;
+  socklen_t typeLen = sizeof(type);
+  if (getpeername(connectedUnixSocketFd, reinterpret_cast<sockaddr *>(&address),
+                  &addressLen) != 0 ||
+      getsockopt(connectedUnixSocketFd, SOL_SOCKET, SO_TYPE, &type, &typeLen) !=
           0)
     throw sysError("inspect unix peer");
-  if (Address.ss_family != AF_UNIX || Type != SOCK_STREAM)
+  if (address.ss_family != AF_UNIX || type != SOCK_STREAM)
     throw CryptoError("peer must be a connected Unix stream socket");
 #ifdef __linux__
   // Read identity from the kernel rather than trusting client-supplied data.
@@ -153,11 +153,11 @@ uid_t alfie::peerUid(int ConnectedUnixSocketFd) {
   return Cred.uid;
 #else
   // macOS/BSD have no SO_PEERCRED; getpeereid(3) is the equivalent.
-  uid_t Uid = 0;
-  gid_t Gid = 0;
-  if (getpeereid(ConnectedUnixSocketFd, &Uid, &Gid) != 0) {
+  uid_t uid = 0;
+  gid_t gid = 0;
+  if (getpeereid(connectedUnixSocketFd, &uid, &gid) != 0) {
     throw sysError("getpeereid");
   }
-  return Uid;
+  return uid;
 #endif
 }

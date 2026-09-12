@@ -25,12 +25,28 @@ cmake --build build --target tidy
 ```
 
 Formatting follows the LLVM preset in `.clang-format`: 80 columns and right-aligned
-pointers (`Type *Pointer`). Naming follows the
-[LLVM/Clang coding standards](https://llvm.org/docs/CodingStandards.html#name-types-functions-variables-and-enumerators-properly):
-`lowerCamelCase` functions; `UpperCamelCase` types, variables, constants, and members.
-Private members have no trailing underscore. Standard-library protocol names such as
-`value_type` keep their required spelling. Naming violations fail `make naming-check`
-and `make tidy`.
+pointers (`Type *pointer`). Naming follows the
+[LLVM/Clang coding standards](https://llvm.org/docs/CodingStandards.html#name-types-functions-variables-and-enumerators-properly)
+for types and functions, with one deliberate departure for values:
+
+| Kind | Style | Example |
+| --- | --- | --- |
+| Namespace | `lower_case` | `alfie` |
+| Class, struct, enum, type alias | `UpperCamelCase` | `ChunkVault`, `UnlockMode` |
+| Enum constant | `UpperCamelCase` | `UnlockMode::Store` |
+| Function, method | `lowerCamelCase` | `deriveKeys`, `findLiveToken` |
+| Variable, parameter, public member | `lowerCamelCase` | `recordKey`, `domain` |
+| Private, protected member | `lowerCamelCase` + `_` | `root_`, `vault_` |
+| Compile-time constant | `k` + `UpperCamelCase` | `kNonceLen` |
+| Template parameter | `UpperCamelCase` | `T` |
+
+LLVM proper spells variables and members `UpperCamelCase` with no member suffix; this
+project uses `lowerCamelCase` with a trailing underscore on private and protected
+members so that a member is distinguishable from a local at the point of use. `const`
+parameters and `const` locals are ordinary variables, not `k` constants -- only
+`constexpr`, `static const` and class constants take the prefix. Standard-library
+protocol names such as `value_type` keep their required spelling. Naming violations
+fail `make naming-check` and `make tidy`.
 
 Use `make format`, `make format-check`, and `make naming-check` for the same targets.
 Install clang-format and clang-tidy locally or set `CLANG_FORMAT` and `CLANG_TIDY`

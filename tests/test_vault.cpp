@@ -17,17 +17,17 @@
 
 using namespace alfie;
 
-static std::string readFile(const std::filesystem::path &P) {
-  std::ifstream In(P, std::ios::binary);
-  return std::string((std::istreambuf_iterator<char>(In)),
+static std::string readFile(const std::filesystem::path &p) {
+  std::ifstream in(p, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)),
                      std::istreambuf_iterator<char>());
 }
 
-static std::filesystem::path firstRecordPath(const std::filesystem::path &Dir) {
-  for (const auto &Entry :
-       std::filesystem::recursive_directory_iterator(Dir / "records")) {
-    if (Entry.path().extension() == ".enc")
-      return Entry.path();
+static std::filesystem::path firstRecordPath(const std::filesystem::path &dir) {
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(dir / "records")) {
+    if (entry.path().extension() == ".enc")
+      return entry.path();
   }
   assert(false && "expected encrypted record");
   return {};
@@ -36,87 +36,87 @@ static std::filesystem::path firstRecordPath(const std::filesystem::path &Dir) {
 // --- Helpers that reproduce the pre-fix (ALFIECHUNK1) writer, for the
 // compatibility test. ---
 
-static std::vector<unsigned char> vaultSalt(const std::filesystem::path &Dir) {
-  std::ifstream In(Dir / "vault.meta", std::ios::binary);
-  std::string Magic, SaltHex;
-  std::getline(In, Magic);
-  std::getline(In, SaltHex);
-  std::vector<unsigned char> Salt;
-  for (size_t I = 0; I + 1 < SaltHex.size(); I += 2)
-    Salt.push_back(static_cast<unsigned char>(
-        std::stoi(SaltHex.substr(I, 2), nullptr, 16)));
-  return Salt;
+static std::vector<unsigned char> vaultSalt(const std::filesystem::path &dir) {
+  std::ifstream in(dir / "vault.meta", std::ios::binary);
+  std::string magic, saltHex;
+  std::getline(in, magic);
+  std::getline(in, saltHex);
+  std::vector<unsigned char> salt;
+  for (size_t i = 0; i + 1 < saltHex.size(); i += 2)
+    salt.push_back(static_cast<unsigned char>(
+        std::stoi(saltHex.substr(i, 2), nullptr, 16)));
+  return salt;
 }
 
-static VaultKeys deriveKeysForVault(const std::filesystem::path &Dir,
-                                    SecureBuffer &Passphrase) {
-  return deriveKeys(Passphrase, vaultSalt(Dir));
+static VaultKeys deriveKeysForVault(const std::filesystem::path &dir,
+                                    SecureBuffer &passphrase) {
+  return deriveKeys(passphrase, vaultSalt(dir));
 }
 
-static std::string legacyIdFor(const SecureBuffer &IndexKey,
-                               const std::string &Purpose,
-                               const std::string &Domain,
-                               const std::string &Account) {
-  const std::string Msg =
-      Purpose + normalizeDomain(Domain) + Account; // separators dropped
-  unsigned int Len = 0;
-  unsigned char Mac[EVP_MAX_MD_SIZE];
-  HMAC(EVP_sha256(), IndexKey.data(), static_cast<int>(IndexKey.size()),
-       reinterpret_cast<const unsigned char *>(Msg.data()), Msg.size(), Mac,
-       &Len);
-  std::string Out;
-  char Buf[3];
-  for (unsigned int I = 0; I < Len; ++I) {
-    std::snprintf(Buf, sizeof(Buf), "%02x", Mac[I]);
-    Out += Buf;
+static std::string legacyIdFor(const SecureBuffer &indexKey,
+                               const std::string &purpose,
+                               const std::string &domain,
+                               const std::string &account) {
+  const std::string msg =
+      purpose + normalizeDomain(domain) + account; // separators dropped
+  unsigned int len = 0;
+  unsigned char mac[EVP_MAX_MD_SIZE];
+  HMAC(EVP_sha256(), indexKey.data(), static_cast<int>(indexKey.size()),
+       reinterpret_cast<const unsigned char *>(msg.data()), msg.size(), mac,
+       &len);
+  std::string out;
+  char buf[3];
+  for (unsigned int i = 0; i < len; ++i) {
+    std::snprintf(buf, sizeof(buf), "%02x", mac[i]);
+    out += buf;
   }
-  return Out;
+  return out;
 }
 
-static void writeLegacyV1Record(const std::filesystem::path &Path,
-                                const SecureBuffer &RecordKey,
-                                const std::string &Plaintext) {
-  const std::string Magic = "ALFIECHUNK1\n";
-  std::vector<unsigned char> Salt(16), Nonce(12);
-  RAND_bytes(Salt.data(), static_cast<int>(Salt.size()));
-  RAND_bytes(Nonce.data(), static_cast<int>(Nonce.size()));
+static void writeLegacyV1Record(const std::filesystem::path &path,
+                                const SecureBuffer &recordKey,
+                                const std::string &plaintext) {
+  const std::string magic = "ALFIECHUNK1\n";
+  std::vector<unsigned char> salt(16), nonce(12);
+  RAND_bytes(salt.data(), static_cast<int>(salt.size()));
+  RAND_bytes(nonce.data(), static_cast<int>(nonce.size()));
 
-  std::vector<unsigned char> Out(Plaintext.size() + 16);
-  EVP_CIPHER_CTX *Ctx = EVP_CIPHER_CTX_new();
-  int Len = 0;
-  EVP_EncryptInit_ex(Ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
-  EVP_CIPHER_CTX_ctrl(Ctx, EVP_CTRL_GCM_SET_IVLEN,
-                      static_cast<int>(Nonce.size()), nullptr);
-  EVP_EncryptInit_ex(Ctx, nullptr, nullptr, RecordKey.data(), Nonce.data());
-  EVP_EncryptUpdate(Ctx, nullptr, &Len,
-                    reinterpret_cast<const unsigned char *>(Magic.data()),
-                    static_cast<int>(Magic.size())); // V1 AAD: the magic only
-  EVP_EncryptUpdate(Ctx, Out.data(), &Len,
-                    reinterpret_cast<const unsigned char *>(Plaintext.data()),
-                    static_cast<int>(Plaintext.size()));
-  int Total = Len;
-  EVP_EncryptFinal_ex(Ctx, Out.data() + Total, &Len);
-  EVP_CIPHER_CTX_ctrl(Ctx, EVP_CTRL_GCM_GET_TAG, 16,
-                      Out.data() + Plaintext.size());
-  EVP_CIPHER_CTX_free(Ctx);
+  std::vector<unsigned char> out(plaintext.size() + 16);
+  EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+  int len = 0;
+  EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr);
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN,
+                      static_cast<int>(nonce.size()), nullptr);
+  EVP_EncryptInit_ex(ctx, nullptr, nullptr, recordKey.data(), nonce.data());
+  EVP_EncryptUpdate(ctx, nullptr, &len,
+                    reinterpret_cast<const unsigned char *>(magic.data()),
+                    static_cast<int>(magic.size())); // V1 AAD: the magic only
+  EVP_EncryptUpdate(ctx, out.data(), &len,
+                    reinterpret_cast<const unsigned char *>(plaintext.data()),
+                    static_cast<int>(plaintext.size()));
+  int total = len;
+  EVP_EncryptFinal_ex(ctx, out.data() + total, &len);
+  EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, 16,
+                      out.data() + plaintext.size());
+  EVP_CIPHER_CTX_free(ctx);
 
-  std::filesystem::create_directories(Path.parent_path());
-  std::ofstream F(Path, std::ios::binary | std::ios::trunc);
-  F.write(Magic.data(), static_cast<std::streamsize>(Magic.size()));
-  F.write(reinterpret_cast<const char *>(Salt.data()),
-          static_cast<std::streamsize>(Salt.size()));
-  F.write(reinterpret_cast<const char *>(Nonce.data()),
-          static_cast<std::streamsize>(Nonce.size()));
-  F.write(reinterpret_cast<const char *>(Out.data()),
-          static_cast<std::streamsize>(Out.size()));
+  std::filesystem::create_directories(path.parent_path());
+  std::ofstream f(path, std::ios::binary | std::ios::trunc);
+  f.write(magic.data(), static_cast<std::streamsize>(magic.size()));
+  f.write(reinterpret_cast<const char *>(salt.data()),
+          static_cast<std::streamsize>(salt.size()));
+  f.write(reinterpret_cast<const char *>(nonce.data()),
+          static_cast<std::streamsize>(nonce.size()));
+  f.write(reinterpret_cast<const char *>(out.data()),
+          static_cast<std::streamsize>(out.size()));
 }
 
 static void testSecureBufferWipes() {
-  SecureBuffer Buf("SECRET");
-  assert(Buf.str() == "SECRET");
-  Buf.wipe();
-  for (auto B : Buf.bytes())
-    assert(B == 0);
+  SecureBuffer buf("SECRET");
+  assert(buf.str() == "SECRET");
+  buf.wipe();
+  for (auto b : buf.bytes())
+    assert(b == 0);
 }
 
 static void testSecretTypesAreMoveOnly() {
@@ -127,243 +127,243 @@ static void testSecretTypesAreMoveOnly() {
 }
 
 static void testArgon2idDerivationWipesPassphraseBuffer() {
-  SecureBuffer Passphrase("correct horse battery staple");
-  auto Keys = deriveKeys(Passphrase, "wipe-test");
-  assert(Keys.IndexKey.size() == 32);
-  assert(Keys.RecordKey.size() == 32);
-  for (auto B : Passphrase.bytes())
-    assert(B == 0);
+  SecureBuffer passphrase("correct horse battery staple");
+  auto keys = deriveKeys(passphrase, "wipe-test");
+  assert(keys.indexKey.size() == 32);
+  assert(keys.recordKey.size() == 32);
+  for (auto b : passphrase.bytes())
+    assert(b == 0);
 }
 
 static void testRecordIdIsStableAndNotPlaintext() {
-  SecureBuffer Passphrase("correct horse battery staple");
-  VaultKeys Keys = deriveKeys(Passphrase, "alfie-v1");
-  auto Id1 = recordId(Keys.IndexKey, "account", "https://www.example.com",
+  SecureBuffer passphrase("correct horse battery staple");
+  VaultKeys keys = deriveKeys(passphrase, "alfie-v1");
+  auto id1 = recordId(keys.indexKey, "account", "https://www.example.com",
                       "yuki@example.com");
-  auto Id2 =
-      recordId(Keys.IndexKey, "account", "example.com", "yuki@example.com");
-  assert(Id1 == Id2);
-  assert(Id1.find("example") == std::string::npos);
-  assert(Id1.find("yuki") == std::string::npos);
-  assert(Id1.size() == 64);
+  auto id2 =
+      recordId(keys.indexKey, "account", "example.com", "yuki@example.com");
+  assert(id1 == id2);
+  assert(id1.find("example") == std::string::npos);
+  assert(id1.find("yuki") == std::string::npos);
+  assert(id1.size() == 64);
 }
 
 static void testPutGetOneChunkWithoutPlaintextOnDisk() {
-  std::filesystem::path Dir =
+  std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "alfie_vault_cpp_test";
-  std::filesystem::remove_all(Dir);
-  std::string Passphrase = "correct horse battery staple";
-  initVault(Dir, "yuki", Passphrase);
-  ChunkVault Vault(Dir);
-  std::string Json =
+  std::filesystem::remove_all(dir);
+  std::string passphrase = "correct horse battery staple";
+  initVault(dir, "yuki", passphrase);
+  ChunkVault vault(dir);
+  std::string json =
       R"({"login":"yuki@example.com","secret":"VERY-SECRET-123!","metadata":{"created_by":"test"}})";
 
-  auto Path =
-      Vault.put("account", "example.com", "yuki@example.com", Passphrase, Json);
-  assert(std::filesystem::exists(Path));
-  assert(Path.string().find("example") == std::string::npos);
+  auto path =
+      vault.put("account", "example.com", "yuki@example.com", passphrase, json);
+  assert(std::filesystem::exists(path));
+  assert(path.string().find("example") == std::string::npos);
 
-  std::string Raw = readFile(Path);
-  assert(Raw.find("VERY-SECRET") == std::string::npos);
-  assert(Raw.find("yuki@example.com") == std::string::npos);
-  assert(Raw.rfind("ALFIECHUNK2\n", 0) == 0);
+  std::string raw = readFile(path);
+  assert(raw.find("VERY-SECRET") == std::string::npos);
+  assert(raw.find("yuki@example.com") == std::string::npos);
+  assert(raw.rfind("ALFIECHUNK2\n", 0) == 0);
 
-  auto Out =
-      Vault.get("account", "example.com", "yuki@example.com", Passphrase);
-  assert(Out == Json);
-  std::filesystem::remove_all(Dir);
+  auto out =
+      vault.get("account", "example.com", "yuki@example.com", passphrase);
+  assert(out == json);
+  std::filesystem::remove_all(dir);
 }
 
 static void testWrongPassphraseFails() {
-  std::filesystem::path Dir =
+  std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "alfie_vault_cpp_wrong_pass";
-  std::filesystem::remove_all(Dir);
-  initVault(Dir, "yuki", "right pass");
-  ChunkVault Vault(Dir);
-  Vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
-  bool Failed = false;
+  std::filesystem::remove_all(dir);
+  initVault(dir, "yuki", "right pass");
+  ChunkVault vault(dir);
+  vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
+  bool failed = false;
   try {
-    (void)Vault.get("account", "example.com", "u", "wrong pass");
+    (void)vault.get("account", "example.com", "u", "wrong pass");
   } catch (const CryptoError &) {
-    Failed = true;
+    failed = true;
   }
-  assert(Failed);
-  std::filesystem::remove_all(Dir);
+  assert(failed);
+  std::filesystem::remove_all(dir);
 }
 
 static void testNewVaultsUseDifferentRandomSalts() {
-  auto Base = std::filesystem::temp_directory_path();
-  auto A = Base / "alfie_vault_cpp_salt_a";
-  auto B = Base / "alfie_vault_cpp_salt_b";
-  std::filesystem::remove_all(A);
-  std::filesystem::remove_all(B);
+  auto base = std::filesystem::temp_directory_path();
+  auto a = base / "alfie_vault_cpp_salt_a";
+  auto b = base / "alfie_vault_cpp_salt_b";
+  std::filesystem::remove_all(a);
+  std::filesystem::remove_all(b);
 
-  std::string Passphrase = "same passphrase";
-  std::string Json = R"({"secret":"same"})";
-  initVault(A, "yuki", Passphrase);
-  initVault(B, "yuki", Passphrase);
-  ChunkVault VaultA(A);
-  ChunkVault VaultB(B);
-  VaultA.put("account", "example.com", "u", Passphrase, Json);
-  VaultB.put("account", "example.com", "u", Passphrase, Json);
+  std::string passphrase = "same passphrase";
+  std::string json = R"({"secret":"same"})";
+  initVault(a, "yuki", passphrase);
+  initVault(b, "yuki", passphrase);
+  ChunkVault vaultA(a);
+  ChunkVault vaultB(b);
+  vaultA.put("account", "example.com", "u", passphrase, json);
+  vaultB.put("account", "example.com", "u", passphrase, json);
 
-  assert(std::filesystem::exists(A / "vault.meta"));
-  assert(std::filesystem::exists(B / "vault.meta"));
-  assert(readFile(A / "vault.meta") != readFile(B / "vault.meta"));
-  assert(firstRecordPath(A).filename() != firstRecordPath(B).filename());
-  assert(VaultA.get("account", "example.com", "u", Passphrase) == Json);
-  assert(VaultB.get("account", "example.com", "u", Passphrase) == Json);
+  assert(std::filesystem::exists(a / "vault.meta"));
+  assert(std::filesystem::exists(b / "vault.meta"));
+  assert(readFile(a / "vault.meta") != readFile(b / "vault.meta"));
+  assert(firstRecordPath(a).filename() != firstRecordPath(b).filename());
+  assert(vaultA.get("account", "example.com", "u", passphrase) == json);
+  assert(vaultB.get("account", "example.com", "u", passphrase) == json);
 
-  std::filesystem::remove_all(A);
-  std::filesystem::remove_all(B);
+  std::filesystem::remove_all(a);
+  std::filesystem::remove_all(b);
 }
 
 static void testRecordCanBeUsedWithoutReturningSecretString() {
-  std::filesystem::path Dir =
+  std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "alfie_vault_cpp_use_record";
-  std::filesystem::remove_all(Dir);
-  initVault(Dir, "yuki", "right pass");
-  ChunkVault Vault(Dir);
-  Vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
+  std::filesystem::remove_all(dir);
+  initVault(dir, "yuki", "right pass");
+  ChunkVault vault(dir);
+  vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
 
-  size_t SeenSize = 0;
-  Vault.use("account", "example.com", "u", "right pass",
-            [&](const SecureBuffer &Secret) {
-              SeenSize = Secret.size();
-              assert(Secret.str() == R"({"secret":"s"})");
+  size_t seenSize = 0;
+  vault.use("account", "example.com", "u", "right pass",
+            [&](const SecureBuffer &secret) {
+              seenSize = secret.size();
+              assert(secret.str() == R"({"secret":"s"})");
             });
 
-  assert(SeenSize == 14);
-  std::filesystem::remove_all(Dir);
+  assert(seenSize == 14);
+  std::filesystem::remove_all(dir);
 }
 
 static void testVaultMustBeInitializedBeforeUse() {
-  auto Dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_uninit";
-  std::filesystem::remove_all(Dir);
+  auto dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_uninit";
+  std::filesystem::remove_all(dir);
 
   // Reading a vault that was never created must fail rather than quietly create
   // one: a typo'd vault path used to become a brand-new empty vault with a
   // fresh salt.
-  ChunkVault Vault(Dir);
-  bool Threw = false;
+  ChunkVault vault(dir);
+  bool threw = false;
   try {
-    Vault.get("account", "example.com", "u", "pass");
+    vault.get("account", "example.com", "u", "pass");
   } catch (const CryptoError &) {
-    Threw = true;
+    threw = true;
   }
-  assert(Threw);
-  assert(!std::filesystem::exists(Dir / "vault.meta"));
-  assert(!vaultInitialized(Dir));
+  assert(threw);
+  assert(!std::filesystem::exists(dir / "vault.meta"));
+  assert(!vaultInitialized(dir));
 
-  Threw = false;
+  threw = false;
   try {
-    Vault.put("account", "example.com", "u", "pass", R"({"secret":"s"})");
+    vault.put("account", "example.com", "u", "pass", R"({"secret":"s"})");
   } catch (const CryptoError &) {
-    Threw = true;
+    threw = true;
   }
-  assert(Threw);
-  assert(!std::filesystem::exists(Dir / "vault.meta"));
-  std::filesystem::remove_all(Dir);
+  assert(threw);
+  assert(!std::filesystem::exists(dir / "vault.meta"));
+  std::filesystem::remove_all(dir);
 }
 
 static void testInitVaultSetsCredentialsAndIsNotRepeatable() {
-  auto Dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_init";
-  std::filesystem::remove_all(Dir);
+  auto dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_init";
+  std::filesystem::remove_all(dir);
 
-  initVault(Dir, "yuki", "master pass");
-  assert(vaultInitialized(Dir));
-  assert(vaultHasCredentials(Dir));
+  initVault(dir, "yuki", "master pass");
+  assert(vaultInitialized(dir));
+  assert(vaultHasCredentials(dir));
 
   // A second init must never re-key a live vault.
-  bool Threw = false;
+  bool threw = false;
   try {
-    initVault(Dir, "someone-else", "other pass");
+    initVault(dir, "someone-else", "other pass");
   } catch (const CryptoError &) {
-    Threw = true;
+    threw = true;
   }
-  assert(Threw);
+  assert(threw);
 
-  assert(verifyCredentials(Dir, "yuki", "master pass"));
-  assert(!verifyCredentials(Dir, "yuki", "wrong pass"));
-  assert(!verifyCredentials(Dir, "wrong-login", "master pass"));
+  assert(verifyCredentials(dir, "yuki", "master pass"));
+  assert(!verifyCredentials(dir, "yuki", "wrong pass"));
+  assert(!verifyCredentials(dir, "wrong-login", "master pass"));
 
   // Neither the login nor the password is recoverable from vault.meta.
-  std::string Meta = readFile(Dir / "vault.meta");
-  assert(Meta.find("yuki") == std::string::npos);
-  assert(Meta.find("master pass") == std::string::npos);
-  assert(Meta.find("ALFIEVAULT2") != std::string::npos);
+  std::string meta = readFile(dir / "vault.meta");
+  assert(meta.find("yuki") == std::string::npos);
+  assert(meta.find("master pass") == std::string::npos);
+  assert(meta.find("ALFIEVAULT2") != std::string::npos);
 
-  std::filesystem::remove_all(Dir);
+  std::filesystem::remove_all(dir);
 }
 
 static void testInitVaultRejectsEmptyCredentials() {
-  auto Base =
+  auto base =
       std::filesystem::temp_directory_path() / "alfie_vault_cpp_init_empty";
-  std::filesystem::remove_all(Base);
+  std::filesystem::remove_all(base);
 
-  bool Threw = false;
+  bool threw = false;
   try {
-    initVault(Base / "a", "", "pass");
+    initVault(base / "a", "", "pass");
   } catch (const CryptoError &) {
-    Threw = true;
+    threw = true;
   }
-  assert(Threw);
+  assert(threw);
 
-  Threw = false;
+  threw = false;
   try {
-    initVault(Base / "b", "yuki", "");
+    initVault(base / "b", "yuki", "");
   } catch (const CryptoError &) {
-    Threw = true;
+    threw = true;
   }
-  assert(Threw);
-  std::filesystem::remove_all(Base);
+  assert(threw);
+  std::filesystem::remove_all(base);
 }
 
 // A vault written before the record-format fix must stay readable: V1 records
 // live at the old (separator-less) record id and authenticate only the magic.
 // Rewriting one upgrades it to V2 at the new id and removes the stale V1 file.
 static void testLegacyV1RecordsAreStillReadable() {
-  std::filesystem::path Dir =
+  std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "alfie_vault_cpp_legacy_v1";
-  std::filesystem::remove_all(Dir);
-  const std::string Passphrase = "correct horse battery staple";
-  const std::string Json = R"({"secret":"legacy-value"})";
-  initVault(Dir, "yuki", Passphrase);
+  std::filesystem::remove_all(dir);
+  const std::string passphrase = "correct horse battery staple";
+  const std::string json = R"({"secret":"legacy-value"})";
+  initVault(dir, "yuki", passphrase);
 
   // Hand-build a V1 record the way the pre-fix code did: id over the
   // concatenated fields with no separators, AAD over the magic alone.
-  SecureBuffer Locked(Passphrase);
-  VaultKeys Keys = deriveKeysForVault(Dir, Locked);
-  const std::string LegacyId =
-      legacyIdFor(Keys.IndexKey, "account", "example.com", "u");
-  const auto Path = Dir / "records" / LegacyId.substr(0, 2) /
-                    LegacyId.substr(2, 2) / (LegacyId + ".enc");
-  writeLegacyV1Record(Path, Keys.RecordKey, Json);
+  SecureBuffer locked(passphrase);
+  VaultKeys keys = deriveKeysForVault(dir, locked);
+  const std::string legacyId =
+      legacyIdFor(keys.indexKey, "account", "example.com", "u");
+  const auto path = dir / "records" / legacyId.substr(0, 2) /
+                    legacyId.substr(2, 2) / (legacyId + ".enc");
+  writeLegacyV1Record(path, keys.recordKey, json);
 
-  ChunkVault Vault(Dir);
-  assert(Vault.get("account", "example.com", "u", Passphrase) == Json);
+  ChunkVault vault(dir);
+  assert(vault.get("account", "example.com", "u", passphrase) == json);
 
   // Rewriting moves it to the V2 id and drops the V1 file.
-  auto NewPath = Vault.put("account", "example.com", "u", Passphrase, Json);
-  assert(NewPath != Path);
-  assert(!std::filesystem::exists(Path));
-  assert(readFile(NewPath).rfind("ALFIECHUNK2\n", 0) == 0);
-  assert(Vault.get("account", "example.com", "u", Passphrase) == Json);
-  std::filesystem::remove_all(Dir);
+  auto newPath = vault.put("account", "example.com", "u", passphrase, json);
+  assert(newPath != path);
+  assert(!std::filesystem::exists(path));
+  assert(readFile(newPath).rfind("ALFIECHUNK2\n", 0) == 0);
+  assert(vault.get("account", "example.com", "u", passphrase) == json);
+  std::filesystem::remove_all(dir);
 }
 
 // Distinct (purpose, domain, account) triples must never collide. Before the
 // fix the separators were dropped, so ("acc","ountX") and ("account","X")
 // hashed to the same record id.
 static void testRecordIdsAreDomainSeparated() {
-  SecureBuffer Passphrase("correct horse battery staple");
-  VaultKeys Keys = deriveKeys(Passphrase, "separator-test");
-  auto A = recordId(Keys.IndexKey, "acc", "example.com", "ountX");
-  auto B = recordId(Keys.IndexKey, "account", "example.com", "X");
-  assert(A != B);
-  auto C = recordId(Keys.IndexKey, "account", "example.com", "");
-  auto D = recordId(Keys.IndexKey, "account", "example.co", "m");
-  assert(C != D);
+  SecureBuffer passphrase("correct horse battery staple");
+  VaultKeys keys = deriveKeys(passphrase, "separator-test");
+  auto a = recordId(keys.indexKey, "acc", "example.com", "ountX");
+  auto b = recordId(keys.indexKey, "account", "example.com", "X");
+  assert(a != b);
+  auto c = recordId(keys.indexKey, "account", "example.com", "");
+  auto d = recordId(keys.indexKey, "account", "example.co", "m");
+  assert(c != d);
 }
 
 // The Argon2id cost line in vault.meta must be load-bearing, not decorative: if
@@ -371,53 +371,53 @@ static void testRecordIdsAreDomainSeparated() {
 // different key for every existing vault. Changing the recorded cost must
 // change the derived key.
 static void testStoredArgon2ParamsAreUsed() {
-  std::filesystem::path Dir =
+  std::filesystem::path dir =
       std::filesystem::temp_directory_path() / "alfie_vault_cpp_params";
-  std::filesystem::remove_all(Dir);
-  initVault(Dir, "yuki", "master pass");
-  assert(verifyCredentials(Dir, "yuki", "master pass"));
+  std::filesystem::remove_all(dir);
+  initVault(dir, "yuki", "master pass");
+  assert(verifyCredentials(dir, "yuki", "master pass"));
 
   // Rewrite only the cost line, leaving salt and verifiers intact.
-  std::string Meta = readFile(Dir / "vault.meta");
-  const auto Start = Meta.find("argon2id ");
-  const auto End = Meta.find('\n', Start);
-  assert(Start != std::string::npos && End != std::string::npos);
-  Meta.replace(Start, End - Start, "argon2id m=32768,t=2,p=1");
+  std::string meta = readFile(dir / "vault.meta");
+  const auto start = meta.find("argon2id ");
+  const auto end = meta.find('\n', start);
+  assert(start != std::string::npos && end != std::string::npos);
+  meta.replace(start, end - start, "argon2id m=32768,t=2,p=1");
   {
-    std::ofstream Out(Dir / "vault.meta", std::ios::binary | std::ios::trunc);
-    Out << Meta;
+    std::ofstream out(dir / "vault.meta", std::ios::binary | std::ios::trunc);
+    out << meta;
   }
 
   // A different cost derives a different key, so the verifiers no longer match.
-  assert(!verifyCredentials(Dir, "yuki", "master pass"));
-  std::filesystem::remove_all(Dir);
+  assert(!verifyCredentials(dir, "yuki", "master pass"));
+  std::filesystem::remove_all(dir);
 }
 
 static void testVaultDirectoriesArePrivateToTheOwner() {
-  auto Dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_perms";
-  std::filesystem::remove_all(Dir);
-  SecureBuffer Passphrase("correct horse battery staple");
-  initVault(Dir, "yuki", Passphrase);
+  auto dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_perms";
+  std::filesystem::remove_all(dir);
+  SecureBuffer passphrase("correct horse battery staple");
+  initVault(dir, "yuki", passphrase);
 
-  const auto OwnerOnly = [](const std::filesystem::path &P) {
-    const auto Perms = std::filesystem::status(P).permissions();
-    return (Perms & (std::filesystem::perms::group_all |
+  const auto ownerOnly = [](const std::filesystem::path &p) {
+    const auto perms = std::filesystem::status(p).permissions();
+    return (perms & (std::filesystem::perms::group_all |
                      std::filesystem::perms::others_all)) ==
            std::filesystem::perms::none;
   };
-  assert(OwnerOnly(Dir));
-  assert(OwnerOnly(Dir / "vault.meta"));
+  assert(ownerOnly(dir));
+  assert(ownerOnly(dir / "vault.meta"));
 
   {
-    SecureBuffer OpenPass("correct horse battery staple");
-    VaultSession Session = VaultSession::open(Dir, "yuki", OpenPass);
-    Session.put("account", "example.com", "u",
+    SecureBuffer openPass("correct horse battery staple");
+    VaultSession session = VaultSession::open(dir, "yuki", openPass);
+    session.put("account", "example.com", "u",
                 SecureBuffer(std::string(R"({"secret":"s"})")));
   }
-  for (const auto &Entry : std::filesystem::recursive_directory_iterator(Dir))
-    assert(OwnerOnly(Entry.path()));
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(dir))
+    assert(ownerOnly(entry.path()));
 
-  std::filesystem::remove_all(Dir);
+  std::filesystem::remove_all(dir);
 }
 
 int main() {

@@ -37,28 +37,28 @@ public:
   SecureBuffer() = default;
   /// Zero-filled buffer of \p Size bytes, for writing crypto output straight
   /// into secure memory instead of staging it on the normal heap first.
-  explicit SecureBuffer(size_t Size);
-  explicit SecureBuffer(const std::string &S);
-  explicit SecureBuffer(SecureBytes Bytes);
+  explicit SecureBuffer(size_t size);
+  explicit SecureBuffer(const std::string &s);
+  explicit SecureBuffer(SecureBytes bytes);
   /// Copies into secure memory and wipes \p Bytes. Only for adapting code that
   /// cannot allocate secure storage up front; prefer the sized constructor.
-  explicit SecureBuffer(std::vector<unsigned char> Bytes);
+  explicit SecureBuffer(std::vector<unsigned char> bytes);
   ~SecureBuffer();
 
   SecureBuffer(const SecureBuffer &) = delete;
   SecureBuffer &operator=(const SecureBuffer &) = delete;
-  SecureBuffer(SecureBuffer &&Other) noexcept = default;
-  SecureBuffer &operator=(SecureBuffer &&Other) noexcept;
+  SecureBuffer(SecureBuffer &&other) noexcept = default;
+  SecureBuffer &operator=(SecureBuffer &&other) noexcept;
 
-  const SecureBytes &bytes() const { return this->Data; }
-  SecureBytes &bytes() { return this->Data; }
-  const unsigned char *data() const { return this->Data.data(); }
-  unsigned char *data() { return this->Data.data(); }
-  size_t size() const { return this->Data.size(); }
-  bool empty() const { return this->Data.empty(); }
+  const SecureBytes &bytes() const { return this->data_; }
+  SecureBytes &bytes() { return this->data_; }
+  const unsigned char *data() const { return this->data_.data(); }
+  unsigned char *data() { return this->data_.data(); }
+  size_t size() const { return this->data_.size(); }
+  bool empty() const { return this->data_.empty(); }
   /// Shrinks in place. Wipes the bytes being dropped, and never reallocates, so
   /// a truncation cannot leave a plaintext copy behind in a freed block.
-  void truncate(size_t Size);
+  void truncate(size_t size);
   /// Copies the secret out into an ordinary std::string. Every caller widens
   /// the plaintext window by doing this -- prefer reading bytes() in place.
   std::string str() const;
@@ -66,20 +66,20 @@ public:
   void wipe();
 
 private:
-  SecureBytes Data;
+  SecureBytes data_;
 };
 
 /// Own the independent indexing and encryption keys for one unlock window.
 struct VaultKeys {
-  VaultKeys(SecureBuffer Index, SecureBuffer Record)
-      : IndexKey(std::move(Index)), RecordKey(std::move(Record)) {}
+  VaultKeys(SecureBuffer index, SecureBuffer record)
+      : indexKey(std::move(index)), recordKey(std::move(record)) {}
   VaultKeys(const VaultKeys &) = delete;
   VaultKeys &operator=(const VaultKeys &) = delete;
   VaultKeys(VaultKeys &&) noexcept = default;
   VaultKeys &operator=(VaultKeys &&) noexcept = default;
 
-  SecureBuffer IndexKey;
-  SecureBuffer RecordKey;
+  SecureBuffer indexKey;
+  SecureBuffer recordKey;
 };
 
 /// Argon2id cost. Stored in vault.meta at init and read back on every unlock,
@@ -87,26 +87,26 @@ struct VaultKeys {
 /// underivable (NIST SP 800-63B migration guidance). Defaults are well above
 /// the OWASP minimum of m=19 MiB, t=2, p=1.
 struct Argon2Params {
-  uint32_t TCost = 3;
-  uint32_t MCostKib = 65536;
-  uint32_t Parallelism = 1;
+  uint32_t tCost = 3;
+  uint32_t mCostKib = 65536;
+  uint32_t parallelism = 1;
 };
 
 /// Argon2id derives independent keys for indexing and record encryption. The
 /// passphrase is wiped as soon as Argon2id returns, so each of these consumes
 /// its argument.
-VaultKeys deriveKeys(SecureBuffer &Passphrase,
-                     const std::vector<unsigned char> &Salt,
-                     const Argon2Params &Params = {});
-VaultKeys deriveKeys(SecureBuffer &Passphrase, const std::string &Context);
+VaultKeys deriveKeys(SecureBuffer &passphrase,
+                     const std::vector<unsigned char> &salt,
+                     const Argon2Params &params = {});
+VaultKeys deriveKeys(SecureBuffer &passphrase, const std::string &context);
 
 /// Extract and lowercase the host, removing a leading www. and trailing dots.
-std::string normalizeDomain(const std::string &DomainOrUrl);
+std::string normalizeDomain(const std::string &domainOrUrl);
 /// Compute an opaque HMAC identifier binding purpose, normalized host and
 /// account.
-std::string recordId(const SecureBuffer &IndexKey, const std::string &Purpose,
-                     const std::string &DomainOrUrl,
-                     const std::string &Account);
+std::string recordId(const SecureBuffer &indexKey, const std::string &purpose,
+                     const std::string &domainOrUrl,
+                     const std::string &account);
 
 /// First-time install. A vault must be created explicitly before any record can
 /// be stored or read: creating it is what fixes the master password and the
@@ -118,21 +118,21 @@ std::string recordId(const SecureBuffer &IndexKey, const std::string &Purpose,
 /// from "no such record" -- without them, a typo at store time silently writes
 /// a record that can never be found again. Neither the login nor the password
 /// is recoverable from the verifiers; they are keyed hashes, not ciphertext.
-bool vaultInitialized(const std::filesystem::path &Root);
+bool vaultInitialized(const std::filesystem::path &root);
 
 /// Throws if the vault already exists, so an init link can never silently
 /// re-key a live vault.
-void initVault(const std::filesystem::path &Root, const std::string &Login,
-               SecureBuffer &Passphrase);
+void initVault(const std::filesystem::path &root, const std::string &login,
+               SecureBuffer &passphrase);
 
 /// Constant-time check of login + master password against the stored verifiers.
 /// Returns false for a legacy ALFIEVAULT1 vault, which predates the verifiers
 /// and cannot be checked.
-bool verifyCredentials(const std::filesystem::path &Root,
-                       const std::string &Login, SecureBuffer &Passphrase);
+bool verifyCredentials(const std::filesystem::path &root,
+                       const std::string &login, SecureBuffer &passphrase);
 
 /// True when the vault carries ALFIEVAULT2 credential verifiers.
-bool vaultHasCredentials(const std::filesystem::path &Root);
+bool vaultHasCredentials(const std::filesystem::path &root);
 
 /// One authorized unlock window.
 ///
@@ -142,16 +142,16 @@ bool vaultHasCredentials(const std::filesystem::path &Root);
 /// record must not mean deriving the master key twice.
 class VaultSession {
 public:
-  /// Derives the master key, wipes \p Passphrase, and checks login + password
+  /// Derives the master key, wipes \p passphrase, and checks login + password
   /// against the stored verifiers. Throws CryptoError if they do not match.
-  static VaultSession open(const std::filesystem::path &Root,
-                           const std::string &Login, SecureBuffer &Passphrase);
+  static VaultSession open(const std::filesystem::path &root,
+                           const std::string &login, SecureBuffer &passphrase);
   /// Checks the master password but not the login, for callers that have no
   /// login to check (the test-fixture CLI) and for legacy ALFIEVAULT1 vaults,
   /// which carry no verifiers at all. A caller that knows the login should
   /// always prefer open().
-  static VaultSession openWithPassword(const std::filesystem::path &Root,
-                                       SecureBuffer &Passphrase);
+  static VaultSession openWithPassword(const std::filesystem::path &root,
+                                       SecureBuffer &passphrase);
 
   VaultSession(const VaultSession &) = delete;
   VaultSession &operator=(const VaultSession &) = delete;
@@ -159,22 +159,22 @@ public:
   VaultSession &operator=(VaultSession &&) noexcept = default;
 
   /// Encrypt one record and return its opaque path; the vault must exist.
-  std::filesystem::path put(const std::string &Purpose,
-                            const std::string &DomainOrUrl,
-                            const std::string &Account,
-                            const SecureBuffer &Plaintext);
+  std::filesystem::path put(const std::string &purpose,
+                            const std::string &domainOrUrl,
+                            const std::string &account,
+                            const SecureBuffer &plaintext);
 
   /// Decrypt one record for the callback and wipe plaintext on every exit path.
-  void use(const std::string &Purpose, const std::string &DomainOrUrl,
-           const std::string &Account,
-           const std::function<void(const SecureBuffer &)> &Callback);
+  void use(const std::string &purpose, const std::string &domainOrUrl,
+           const std::string &account,
+           const std::function<void(const SecureBuffer &)> &callback);
 
 private:
-  VaultSession(std::filesystem::path Root, VaultKeys Keys)
-      : Root(std::move(Root)), Keys(std::move(Keys)) {}
+  VaultSession(std::filesystem::path root, VaultKeys keys)
+      : root_(std::move(root)), keys_(std::move(keys)) {}
 
-  std::filesystem::path Root;
-  VaultKeys Keys;
+  std::filesystem::path root_;
+  VaultKeys keys_;
 };
 
 /// Access one encrypted record at a time without checking a login.
@@ -182,19 +182,19 @@ private:
 /// verification.
 class ChunkVault {
 public:
-  explicit ChunkVault(std::filesystem::path Root);
+  explicit ChunkVault(std::filesystem::path root);
 
   /// Encrypt one record and return its opaque path; the vault must exist.
-  std::filesystem::path put(const std::string &Purpose,
-                            const std::string &DomainOrUrl,
-                            const std::string &Account,
-                            SecureBuffer &Passphrase,
-                            const SecureBuffer &Plaintext);
+  std::filesystem::path put(const std::string &purpose,
+                            const std::string &domainOrUrl,
+                            const std::string &account,
+                            SecureBuffer &passphrase,
+                            const SecureBuffer &plaintext);
 
   /// Decrypt one record for the callback and wipe plaintext on every exit path.
-  void use(const std::string &Purpose, const std::string &DomainOrUrl,
-           const std::string &Account, SecureBuffer &Passphrase,
-           const std::function<void(const SecureBuffer &)> &Callback);
+  void use(const std::string &purpose, const std::string &domainOrUrl,
+           const std::string &account, SecureBuffer &passphrase,
+           const std::function<void(const SecureBuffer &)> &callback);
 
   // -------------------------------------------------------------------------
   /// Test fixtures only. These take and return secrets as plain std::string,
@@ -203,28 +203,28 @@ public:
   /// them; see docs/best-practices.md rule 1.
   // -------------------------------------------------------------------------
   /// Encrypt one record and return its opaque path; the vault must exist.
-  std::filesystem::path put(const std::string &Purpose,
-                            const std::string &DomainOrUrl,
-                            const std::string &Account,
-                            const std::string &Passphrase,
-                            const std::string &PlaintextJson);
-  std::string get(const std::string &Purpose, const std::string &DomainOrUrl,
-                  const std::string &Account, const std::string &Passphrase);
+  std::filesystem::path put(const std::string &purpose,
+                            const std::string &domainOrUrl,
+                            const std::string &account,
+                            const std::string &passphrase,
+                            const std::string &plaintextJson);
+  std::string get(const std::string &purpose, const std::string &domainOrUrl,
+                  const std::string &account, const std::string &passphrase);
   /// Decrypt one record for the callback and wipe plaintext on every exit path.
-  void use(const std::string &Purpose, const std::string &DomainOrUrl,
-           const std::string &Account, const std::string &Passphrase,
-           const std::function<void(const SecureBuffer &)> &Callback);
+  void use(const std::string &purpose, const std::string &domainOrUrl,
+           const std::string &account, const std::string &passphrase,
+           const std::function<void(const SecureBuffer &)> &callback);
 
 private:
-  std::filesystem::path Root;
+  std::filesystem::path root_;
 };
 
 /// Test fixtures only, for the same reason as the ChunkVault string overloads
 /// above.
-void initVault(const std::filesystem::path &Root, const std::string &Login,
-               const std::string &Passphrase);
-bool verifyCredentials(const std::filesystem::path &Root,
-                       const std::string &Login, const std::string &Passphrase);
+void initVault(const std::filesystem::path &root, const std::string &login,
+               const std::string &passphrase);
+bool verifyCredentials(const std::filesystem::path &root,
+                       const std::string &login, const std::string &passphrase);
 
 } // namespace alfie
 

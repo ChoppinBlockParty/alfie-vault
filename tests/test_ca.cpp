@@ -18,140 +18,140 @@ using namespace alfie;
 
 // Small keys throughout: these tests exercise certificate shape, not RSA
 // strength.
-static constexpr int TestBits = 2048;
+static constexpr int kTestBits = 2048;
 
-static X509 *parse(const std::string &Pem) {
-  BIO *Bio = BIO_new_mem_buf(Pem.data(), static_cast<int>(Pem.size()));
-  X509 *Cert = PEM_read_bio_X509(Bio, nullptr, nullptr, nullptr);
-  BIO_free(Bio);
-  assert(Cert != nullptr);
-  return Cert;
+static X509 *parse(const std::string &pem) {
+  BIO *bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+  X509 *cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+  BIO_free(bio);
+  assert(cert != nullptr);
+  return cert;
 }
 
-static bool isCertificateAuthority(X509 *Cert) {
-  BASIC_CONSTRAINTS *Bc = static_cast<BASIC_CONSTRAINTS *>(
-      X509_get_ext_d2i(Cert, NID_basic_constraints, nullptr, nullptr));
-  const bool Ca = Bc != nullptr && Bc->ca;
-  BASIC_CONSTRAINTS_free(Bc);
-  return Ca;
+static bool isCertificateAuthority(X509 *cert) {
+  BASIC_CONSTRAINTS *bc = static_cast<BASIC_CONSTRAINTS *>(
+      X509_get_ext_d2i(cert, NID_basic_constraints, nullptr, nullptr));
+  const bool ca = bc != nullptr && bc->ca;
+  BASIC_CONSTRAINTS_free(bc);
+  return ca;
 }
 
-static bool hasIpSan(X509 *Cert, const std::string &Ip) {
-  bool Found = false;
-  auto *Names = static_cast<GENERAL_NAMES *>(
-      X509_get_ext_d2i(Cert, NID_subject_alt_name, nullptr, nullptr));
-  if (Names != nullptr) {
-    for (int I = 0; I < sk_GENERAL_NAME_num(Names); ++I) {
-      const GENERAL_NAME *Name = sk_GENERAL_NAME_value(Names, I);
-      if (Name->type != GEN_IPADD)
+static bool hasIpSan(X509 *cert, const std::string &ip) {
+  bool found = false;
+  auto *names = static_cast<GENERAL_NAMES *>(
+      X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+  if (names != nullptr) {
+    for (int i = 0; i < sk_GENERAL_NAME_num(names); ++i) {
+      const GENERAL_NAME *name = sk_GENERAL_NAME_value(names, i);
+      if (name->type != GEN_IPADD)
         continue;
-      const unsigned char *Data = Name->d.iPAddress->data;
-      if (Name->d.iPAddress->length == 4) {
-        const std::string Rendered =
-            std::to_string(Data[0]) + "." + std::to_string(Data[1]) + "." +
-            std::to_string(Data[2]) + "." + std::to_string(Data[3]);
-        Found = Found || Rendered == Ip;
+      const unsigned char *data = name->d.iPAddress->data;
+      if (name->d.iPAddress->length == 4) {
+        const std::string rendered =
+            std::to_string(data[0]) + "." + std::to_string(data[1]) + "." +
+            std::to_string(data[2]) + "." + std::to_string(data[3]);
+        found = found || rendered == ip;
       }
     }
-    GENERAL_NAMES_free(Names);
+    GENERAL_NAMES_free(names);
   }
-  return Found;
+  return found;
 }
 
-static std::string readFile(const std::filesystem::path &Path) {
-  std::ifstream In(Path, std::ios::binary);
-  return std::string((std::istreambuf_iterator<char>(In)),
+static std::string readFile(const std::filesystem::path &path) {
+  std::ifstream in(path, std::ios::binary);
+  return std::string((std::istreambuf_iterator<char>(in)),
                      std::istreambuf_iterator<char>());
 }
 
 static void testCaIsSelfSignedAndMarkedAsACa() {
-  auto Ca = generateCaCertificate("Alfie Test CA", 30, TestBits);
+  auto ca = generateCaCertificate("Alfie Test CA", 30, kTestBits);
 
-  X509 *Cert = parse(Ca.CertificatePem);
-  assert(isCertificateAuthority(Cert));
+  X509 *cert = parse(ca.certificatePem);
+  assert(isCertificateAuthority(cert));
   // Self-signed: issuer and subject match, and it verifies under its own key.
-  assert(X509_NAME_cmp(X509_get_issuer_name(Cert),
-                       X509_get_subject_name(Cert)) == 0);
-  EVP_PKEY *Pub = X509_get_pubkey(Cert);
-  assert(X509_verify(Cert, Pub) == 1);
-  EVP_PKEY_free(Pub);
-  X509_free(Cert);
+  assert(X509_NAME_cmp(X509_get_issuer_name(cert),
+                       X509_get_subject_name(cert)) == 0);
+  EVP_PKEY *pub = X509_get_pubkey(cert);
+  assert(X509_verify(cert, pub) == 1);
+  EVP_PKEY_free(pub);
+  X509_free(cert);
 
   // The key comes back as PEM inside a SecureBuffer, never as a plain string on
   // the heap.
-  assert(Ca.PrivateKeyPem.str().find("PRIVATE KEY") != std::string::npos);
+  assert(ca.privateKeyPem.str().find("PRIVATE KEY") != std::string::npos);
 }
 
 static void testIpCertificateIsSignedByTheCaAndCarriesTheIp() {
-  auto Ca = generateCaCertificate("Alfie Test CA", 30, TestBits);
-  auto Server = issueIpCertificate("10.1.2.3", Ca.CertificatePem,
-                                   Ca.PrivateKeyPem, 30, TestBits);
+  auto ca = generateCaCertificate("Alfie Test CA", 30, kTestBits);
+  auto server = issueIpCertificate("10.1.2.3", ca.certificatePem,
+                                   ca.privateKeyPem, 30, kTestBits);
 
-  X509 *CaCert = parse(Ca.CertificatePem);
-  X509 *ServerCert = parse(Server.CertificatePem);
+  X509 *caCert = parse(ca.certificatePem);
+  X509 *serverCert = parse(server.certificatePem);
 
-  assert(!isCertificateAuthority(ServerCert));
-  assert(hasIpSan(ServerCert, "10.1.2.3"));
+  assert(!isCertificateAuthority(serverCert));
+  assert(hasIpSan(serverCert, "10.1.2.3"));
 
   // Verifies under the CA's public key, and not under an unrelated CA.
-  EVP_PKEY *CaPub = X509_get_pubkey(CaCert);
-  assert(X509_verify(ServerCert, CaPub) == 1);
-  EVP_PKEY_free(CaPub);
+  EVP_PKEY *caPub = X509_get_pubkey(caCert);
+  assert(X509_verify(serverCert, caPub) == 1);
+  EVP_PKEY_free(caPub);
 
-  auto Other = generateCaCertificate("Other CA", 30, TestBits);
-  X509 *OtherCert = parse(Other.CertificatePem);
-  EVP_PKEY *OtherPub = X509_get_pubkey(OtherCert);
-  assert(X509_verify(ServerCert, OtherPub) != 1);
-  EVP_PKEY_free(OtherPub);
+  auto other = generateCaCertificate("Other CA", 30, kTestBits);
+  X509 *otherCert = parse(other.certificatePem);
+  EVP_PKEY *otherPub = X509_get_pubkey(otherCert);
+  assert(X509_verify(serverCert, otherPub) != 1);
+  EVP_PKEY_free(otherPub);
 
-  X509_free(OtherCert);
-  X509_free(ServerCert);
-  X509_free(CaCert);
+  X509_free(otherCert);
+  X509_free(serverCert);
+  X509_free(caCert);
 }
 
 static void testEphemeralCertificateIsSelfSignedAndShortLived() {
-  auto Ephemeral = generateEphemeralCertificate("127.0.0.1", 1, TestBits);
-  X509 *Cert = parse(Ephemeral.CertificatePem);
-  assert(!isCertificateAuthority(Cert));
-  assert(hasIpSan(Cert, "127.0.0.1"));
-  assert(X509_NAME_cmp(X509_get_issuer_name(Cert),
-                       X509_get_subject_name(Cert)) == 0);
-  X509_free(Cert);
+  auto ephemeral = generateEphemeralCertificate("127.0.0.1", 1, kTestBits);
+  X509 *cert = parse(ephemeral.certificatePem);
+  assert(!isCertificateAuthority(cert));
+  assert(hasIpSan(cert, "127.0.0.1"));
+  assert(X509_NAME_cmp(X509_get_issuer_name(cert),
+                       X509_get_subject_name(cert)) == 0);
+  X509_free(cert);
 }
 
 static void testFingerprintMatchesOpensslFormatAndIsUnique() {
-  auto A = generateCaCertificate("A", 30, TestBits);
-  auto B = generateCaCertificate("B", 30, TestBits);
+  auto a = generateCaCertificate("A", 30, kTestBits);
+  auto b = generateCaCertificate("B", 30, kTestBits);
 
-  const auto Fingerprint = certificateFingerprintSha256(A.CertificatePem);
+  const auto fingerprint = certificateFingerprintSha256(a.certificatePem);
   // 32 bytes rendered as uppercase hex pairs joined by colons.
-  assert(Fingerprint.size() == (32 * 3) - 1);
-  assert(Fingerprint[2] == ':');
-  for (char C : Fingerprint)
-    assert(C == ':' || (C >= '0' && C <= '9') || (C >= 'A' && C <= 'F'));
+  assert(fingerprint.size() == (32 * 3) - 1);
+  assert(fingerprint[2] == ':');
+  for (char c : fingerprint)
+    assert(c == ':' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'));
 
-  assert(certificateFingerprintSha256(A.CertificatePem) == Fingerprint);
-  assert(certificateFingerprintSha256(B.CertificatePem) != Fingerprint);
+  assert(certificateFingerprintSha256(a.certificatePem) == fingerprint);
+  assert(certificateFingerprintSha256(b.certificatePem) != fingerprint);
 }
 
 static void testPrivateFilesAreCreatedUnreadableToOthers() {
-  auto Dir = std::filesystem::temp_directory_path() / "alfie_ca_write_test";
-  std::filesystem::remove_all(Dir);
+  auto dir = std::filesystem::temp_directory_path() / "alfie_ca_write_test";
+  std::filesystem::remove_all(dir);
 
-  auto Ca = generateCaCertificate("Alfie Test CA", 30, TestBits);
-  writePublicFile(Dir / "cert.pem", Ca.CertificatePem);
-  writePrivateFile(Dir / "key.pem", Ca.PrivateKeyPem);
+  auto ca = generateCaCertificate("Alfie Test CA", 30, kTestBits);
+  writePublicFile(dir / "cert.pem", ca.certificatePem);
+  writePrivateFile(dir / "key.pem", ca.privateKeyPem);
 
-  const auto PrivatePerms =
-      std::filesystem::status(Dir / "key.pem").permissions();
-  assert((PrivatePerms & (std::filesystem::perms::group_all |
+  const auto privatePerms =
+      std::filesystem::status(dir / "key.pem").permissions();
+  assert((privatePerms & (std::filesystem::perms::group_all |
                           std::filesystem::perms::others_all)) ==
          std::filesystem::perms::none);
 
-  assert(readFile(Dir / "cert.pem") == Ca.CertificatePem);
-  assert(readFile(Dir / "key.pem") == Ca.PrivateKeyPem.str());
+  assert(readFile(dir / "cert.pem") == ca.certificatePem);
+  assert(readFile(dir / "key.pem") == ca.privateKeyPem.str());
 
-  std::filesystem::remove_all(Dir);
+  std::filesystem::remove_all(dir);
 }
 
 int main() {

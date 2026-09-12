@@ -106,7 +106,7 @@ valid for the one token/domain/action it was minted for. `ReplayGuard` rejects r
 primary use case above. Hand-rolled HTTP parsing and a small OpenSSL TLS server (no framework).
 `UnlockService` mints single-use, TTL-bound tokens in three modes (`UnlockMode`) — `/init/<token>`
 (first-time setup), `/unlock/<token>` (decrypt one record), `/store/<token>` (encrypt a pasted
-secret). A token is minted for exactly one mode and rejected on any other path; `liveToken()` is
+secret). A token is minted for exactly one mode and rejected on any other path; `findLiveToken()` is
 the single place that checks existence, `used`, mode match and expiry, on both GET and POST.
 Pages are mobile-friendly inline HTML. `handleSubmit` records only metadata in `LastDelivery`
 (token/domain/account/action/secret size) for the unlock path — wiring that to the encrypted IPC
@@ -159,11 +159,16 @@ load-bearing, and the tests assert all three.
   "must improve next" list (IPC delivery wiring, re-storing V1 records, probing that the secure
   arena is really resident, `ReplayGuard` growth, unlock rate-limiting); consult it before changing
   crypto or memory handling.
-- Style follows LLVM/Clang via `.clang-format` (LLVM preset: 80 columns, right-aligned pointers).
-  Functions use `lowerCamelCase`; types, variables, constants, and members use `UpperCamelCase`
-  without a private-member suffix. Standard-library protocol names such as `value_type` retain
-  their required spelling. `.clang-tidy` enforces naming with `make naming-check`. All code is
-  in `namespace alfie`. Crypto/auth failures throw `alfie::CryptoError`.
+- Formatting follows LLVM/Clang via `.clang-format` (LLVM preset: 80 columns, right-aligned
+  pointers). Naming is LLVM for types and functions but deliberately **not** LLVM for values:
+  functions, methods, variables, parameters and members use `lowerCamelCase`; private and
+  protected members carry a trailing underscore (`root_`); compile-time constants take a `k`
+  prefix (`kNonceLen`); types, enums and enum constants use `UpperCamelCase`. LLVM itself would
+  spell every variable `UpperCamelCase` with no member suffix -- the departure is intentional, so
+  a member is distinguishable from a local at the point of use. Standard-library protocol names
+  such as `value_type` retain their required spelling. `.clang-tidy` is the authority and
+  `make naming-check` enforces it. All code is in `namespace alfie`. Crypto/auth failures throw
+  `alfie::CryptoError`.
 - Tests are plain `assert`-based `main()` binaries (no framework) for C++, and standalone Python
   scripts driving the shell scripts and a real TLS server for the integration tests. `openssl` and
   `python3` must be on PATH for those.

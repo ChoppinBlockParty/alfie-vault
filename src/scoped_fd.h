@@ -14,25 +14,25 @@ namespace alfie {
 /// Close owned descriptors on every exit path, including exceptions.
 class ScopedFd {
 public:
-  explicit ScopedFd(int Fd) : Fd(Fd) {}
+  explicit ScopedFd(int fd) : fd_(fd) {}
   ~ScopedFd() { reset(-1); }
   ScopedFd(const ScopedFd &) = delete;
   ScopedFd &operator=(const ScopedFd &) = delete;
 
-  int get() const { return this->Fd; }
+  int get() const { return this->fd_; }
 
   /// Transfer ownership to a caller that manages the descriptor lifetime.
-  int release() { return std::exchange(this->Fd, -1); }
+  int release() { return std::exchange(this->fd_, -1); }
 
   /// Replace a directory descriptor while walking a validated path.
-  void reset(int Fd) {
-    if (this->Fd >= 0)
-      close(this->Fd);
-    this->Fd = Fd;
+  void reset(int fd) {
+    if (this->fd_ >= 0)
+      close(this->fd_);
+    this->fd_ = fd;
   }
 
 private:
-  int Fd;
+  int fd_;
 };
 
 } // namespace alfie

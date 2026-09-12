@@ -15,16 +15,16 @@ namespace alfie {
 /// ipc_crypto.h; this layer keeps the socket private to Alfie's Unix user.
 /// Requires an absolute path without symlinks and trusted ancestors; existing
 /// mode must be 0700.
-std::filesystem::path makePrivateRuntimeDir(const std::filesystem::path &Dir);
+std::filesystem::path makePrivateRuntimeDir(const std::filesystem::path &dir);
 /// Returns a nonblocking, close-on-exec descriptor owned by the caller. Never
 /// replaces a path. Caller closes the descriptor and explicitly removes its
 /// socket after stopping the listener.
-int bindSecureUnixSocket(const std::filesystem::path &SocketPath);
+int bindSecureUnixSocket(const std::filesystem::path &socketPath);
 /// Accepted descriptors are nonblocking and close-on-exec; mismatched peers are
 /// closed.
-int acceptSecureUnixSocket(int Listener, uid_t ExpectedUid);
+int acceptSecureUnixSocket(int listener, uid_t expectedUid);
 /// Query kernel credentials, rejecting descriptors that are not Unix streams.
-uid_t peerUid(int ConnectedUnixSocketFd);
+uid_t peerUid(int connectedUnixSocketFd);
 
 } // namespace alfie
 

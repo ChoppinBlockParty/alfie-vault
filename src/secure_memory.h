@@ -27,11 +27,11 @@ struct MemoryProtections {
   /// arena that is mlock'd once as a whole. This is the wanted state: it also
   /// removes the page-sharing hazard of per-buffer mlock (see
   /// secure_memory.cpp).
-  bool SecureHeap = false;
+  bool secureHeap = false;
   /// setrlimit(RLIMIT_CORE, 0) succeeded, so a crash cannot spill secrets into
   /// a core file.
-  bool CoreDumpsDisabled = false;
-  MemoryPolicy Policy = MemoryPolicy::BestEffort;
+  bool coreDumpsDisabled = false;
+  MemoryPolicy policy = MemoryPolicy::BestEffort;
 };
 
 /// Call once at process start, before any secret is read. Initializes the
@@ -40,8 +40,8 @@ struct MemoryProtections {
 ///
 /// Not calling it is safe: allocations then fall back to malloc + per-buffer
 /// mlock, which is what this codebase did before the secure heap existed.
-MemoryProtections initProcessMemoryProtections(MemoryPolicy Policy,
-                                               size_t SecureHeapBytes = 2U
+MemoryProtections initProcessMemoryProtections(MemoryPolicy policy,
+                                               size_t secureHeapBytes = 2U
                                                                         << 20);
 
 /// Return the last initialization result; this function does not initialize it.
@@ -51,8 +51,8 @@ bool strictMemory();
 
 /// Raw secret allocation. Prefer SecureAllocator/SecureBuffer over calling
 /// these.
-void *secureAllocate(size_t Bytes);
-void secureDeallocate(void *P, size_t Bytes) noexcept;
+void *secureAllocate(size_t bytes);
+void secureDeallocate(void *p, size_t bytes) noexcept;
 
 /// Allocator that keeps container storage in locked, dump-excluded,
 /// wipe-on-free memory.
@@ -63,14 +63,14 @@ template <typename T> struct SecureAllocator {
   template <typename U>
   SecureAllocator(const SecureAllocator<U> & /*Other*/) noexcept {}
 
-  T *allocate(size_t N) {
-    if (N > std::numeric_limits<size_t>::max() / sizeof(T))
+  T *allocate(size_t n) {
+    if (n > std::numeric_limits<size_t>::max() / sizeof(T))
       throw std::bad_alloc();
-    return static_cast<T *>(secureAllocate(N * sizeof(T)));
+    return static_cast<T *>(secureAllocate(n * sizeof(T)));
   }
 
-  void deallocate(T *P, size_t N) noexcept {
-    secureDeallocate(P, N * sizeof(T));
+  void deallocate(T *p, size_t n) noexcept {
+    secureDeallocate(p, n * sizeof(T));
   }
 
   template <typename U>
