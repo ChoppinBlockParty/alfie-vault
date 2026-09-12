@@ -2,6 +2,26 @@
 
 C++ encrypted chunk vault for Alfie credentials and card details.
 
+## Primary use case
+
+A secure secret vault that lives on a **remote box** (server, VPS, always-on machine), holding
+credentials that automation on that box needs but must not hold permanently.
+
+The vault stays encrypted at rest and there is no unattended unlock path. When a task needs a
+credential:
+
+1. The vault process mints a **one-time, TTL-bound HTTPS link** for exactly one record
+   (purpose/domain/account/action).
+2. A **human opens that link** from a phone or laptop and enters the vault login and master
+   password. That human step is the authorization; nothing on the remote box can perform it.
+3. Exactly one chunk is decrypted, used for that one task, and wiped. The link is consumed and
+   cannot be replayed.
+4. The secret value is **never shown on the page**, never logged, and never passed through argv,
+   chat, or files.
+
+So the master password is present on the remote box only for the brief window of a single
+authorized task, and the blast radius of any one unlock is one record — not the whole vault.
+
 ## Design
 
 - Runtime vault is a directory of small encrypted records, not one big decrypted JSON.
