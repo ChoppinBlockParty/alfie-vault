@@ -41,6 +41,20 @@ start rather than hold a master password it cannot protect. The default is best-
 - Failed unlock attempts are neither rate-limited nor audit-logged within a token's TTL window.
 - The production path must use a short-lived HTTPS unlock server and stdin/socket memory buffers.
 
+## First-time setup
+
+Creating the vault is a separate one-time act: it fixes the login and master password, generates
+the local CA in memory, and stores the CA private key inside the vault. The setup page is served
+under a one-off certificate whose fingerprint is printed on the box's terminal for out-of-band
+comparison, and it is styled red so it cannot be mistaken for a routine unlock.
+
+The setup server refuses to start once a vault exists, and `init_vault` throws if `vault.meta` is
+present, so an init link can never re-key a live vault. See `docs/first-time-init.md`.
+
+The residual risk is phishing, not forgery: an attacker who stands up their own empty vault and
+persuades you to type your master password into its setup page has harvested that password. The
+fingerprint comparison is the defense; the red styling only makes the page hard to confuse.
+
 ## Export
 
 Export only encrypted files:

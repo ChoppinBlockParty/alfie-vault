@@ -83,42 +83,6 @@ static void test_store_token_adds_new_secret_without_echoing_value() {
   std::filesystem::remove_all(dir);
 }
 
-static void test_store_file_token_encrypts_file_and_removes_source() {
-  auto dir = std::filesystem::temp_directory_path() / "alfie_http_store_file_secret";
-  auto source = std::filesystem::temp_directory_path() / "alfie_ca_key_source.pem";
-  std::filesystem::remove_all(dir);
-  std::filesystem::remove(source);
-  {
-    std::ofstream out(source, std::ios::binary);
-    out << "PRIVATE-CA-KEY-MATERIAL";
-  }
-  init_vault(dir, "yuki", "master pass");
-  UnlockService service(dir, "yuki");
-  auto token = service.create_store_file_token(
-      {"secret-file", "alfie.local.ca", "alfie-local-ca-key.pem", "store_ca_key"}, source);
-
-  auto form = service.handle({"GET", "/store-file/" + token, "", {}});
-  assert(form.status == 200);
-  assert(form.body.find("name=\"viewport\"") != std::string::npos);
-  assert(form.body.find("inputmode=\"text\"") != std::string::npos);
-  assert(form.body.find("min-height:100vh") != std::string::npos);
-  assert(form.body.find("font-family") != std::string::npos);
-  assert(form.body.find("PRIVATE-CA-KEY-MATERIAL") == std::string::npos);
-  assert(form.body.find("No secret value will be shown") != std::string::npos);
-
-  auto response =
-      service.handle({"POST", "/store-file/" + token, "login=yuki&password=master+pass", {}});
-  assert(response.status == 200);
-  assert(response.body.find("Stored") != std::string::npos);
-  assert(response.body.find("PRIVATE-CA-KEY-MATERIAL") == std::string::npos);
-  assert(!std::filesystem::exists(source));
-
-  ChunkVault vault(dir);
-  assert(vault.get("secret-file", "alfie.local.ca", "alfie-local-ca-key.pem", "master pass") ==
-         "PRIVATE-CA-KEY-MATERIAL");
-  std::filesystem::remove_all(dir);
-}
-
 static void test_bad_login_does_not_consume_token() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_unlock_bad_login";
   prepare_vault(dir);
@@ -146,13 +110,25 @@ static void test_http_parse_and_render() {
   assert(text.find("Content-Length: 7") != std::string::npos);
 }
 
-static void test_init_link_creates_vault_and_sets_credentials() {
+static InitPlan test_plan(const std::filesystem::path& output_dir) {
+  InitPlan plan;
+  plan.output_dir = output_dir;
+  plan.server_ip = "127.0.0.1";
+  // Small keys: these tests exercise the plumbing, not RSA.
+  plan.ca_rsa_bits = 2048;
+  plan.server_rsa_bits = 2048;
+  return plan;
+}
+
+static void test_init_link_creates_vault_ca_and_credentials() {
   auto dir = std::filesystem::temp_directory_path() / "alfie_http_init";
+  auto out = std::filesystem::temp_directory_path() / "alfie_http_init_out";
   std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(out);
 
   // No vault yet, and no login known to the service: the one-time token is the authorization.
   UnlockService service(dir, "");
-  auto token = service.create_init_token({"init", "", "", "init_vault"});
+  auto token = service.create_init_token({"init", "", "", "init_vault"}, test_plan(out));
 
   auto form = service.handle({"GET", "/init/" + token, "", {}});
   assert(form.status == 200);
@@ -160,24 +136,121 @@ static void test_init_link_creates_vault_and_sets_credentials() {
 
   // Mismatched confirmation must not create anything.
   auto mismatch = service.handle(
-      {"POST", "/init/" + token, "login=yuki&password=Zorb7-Quilm&confirm=typo", {}});
+      {"POST", "/init/" + token, "login=yuki&password=Zorb7-Quilm-Xy&confirm=typo", {}});
   assert(mismatch.status == 400);
   assert(!vault_initialized(dir));
 
+  // A password below the floor is refused while it can still be changed.
+  auto too_short =
+      service.handle({"POST", "/init/" + token, "login=yuki&password=short&confirm=short", {}});
+  assert(too_short.status == 400);
+  assert(!vault_initialized(dir));
+
   auto created = service.handle(
-      {"POST", "/init/" + token, "login=yuki&password=Zorb7-Quilm&confirm=Zorb7-Quilm", {}});
+      {"POST", "/init/" + token, "login=yuki&password=Zorb7-Quilm-Xy&confirm=Zorb7-Quilm-Xy", {}});
   assert(created.status == 201);
   assert(vault_initialized(dir));
   assert(vault_has_credentials(dir));
-  assert(created.body.find("Zorb7-Quilm") == std::string::npos);
+  assert(created.body.find("Zorb7-Quilm-Xy") == std::string::npos);
 
-  // The init link is one-time, like every other link.
+  // The CA certificate is public and written out; the CA private key is not on disk anywhere.
+  const auto ca_cert = out / "alfie-local-ca-cert.pem";
+  assert(std::filesystem::exists(ca_cert));
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(out)) {
+    if (!entry.is_regular_file())
+      continue;
+    std::ifstream in(entry.path(), std::ios::binary);
+    std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const bool is_server_key = entry.path().filename() == "alfie-ip-key.pem";
+    if (!is_server_key)
+      assert(contents.find("PRIVATE KEY") == std::string::npos);
+  }
+
+  // The CA private key lives in the vault, reachable only with the master password.
+  {
+    SecureBuffer password("Zorb7-Quilm-Xy");
+    VaultSession session = VaultSession::open(dir, "yuki", password);
+    bool saw_key = false;
+    session.use(kCaKeyPurpose, kCaKeyDomain, kCaKeyAccount, [&](const SecureBuffer& secret) {
+      saw_key = secret.str().find("PRIVATE KEY") != std::string::npos;
+    });
+    assert(saw_key);
+  }
+
+  // The server certificate is issued for the planned IP and its key is 0600.
+  const auto server_key = out / "alfie-ip-key.pem";
+  assert(std::filesystem::exists(server_key));
+  assert((std::filesystem::status(server_key).permissions() &
+          (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) ==
+         std::filesystem::perms::none);
+
+  // The setup link is one-time, and the service reports that it is done serving.
+  assert(service.finished());
   auto replay = service.handle(
-      {"POST", "/init/" + token, "login=yuki&password=other+pass&confirm=other+pass", {}});
+      {"POST", "/init/" + token, "login=yuki&password=Other-Password-1&confirm=Other-Password-1",
+       {}});
   assert(replay.status == 410);
-  assert(verify_credentials(dir, "yuki", "Zorb7-Quilm"));
 
   std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(out);
+}
+
+static void test_setup_page_is_visually_distinct_and_shows_fingerprint() {
+  auto dir = std::filesystem::temp_directory_path() / "alfie_http_init_look";
+  auto out = std::filesystem::temp_directory_path() / "alfie_http_init_look_out";
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(out);
+
+  UnlockService service(dir, "");
+  service.set_transport_fingerprint("AA:BB:CC:DD");
+  auto token = service.create_init_token({"init", "", "", "init_vault"}, test_plan(out));
+  auto page = service.handle({"GET", "/init/" + token, "", {}}).body;
+
+  // Red surface, not the slate used by the routine pages.
+  assert(page.find("#450a0a") != std::string::npos);
+  assert(page.find("#0f172a") == std::string::npos);
+  // Says what it is and warns about the phishing case.
+  assert(page.find("FIRST-TIME VAULT SETUP") != std::string::npos);
+  assert(page.find("exactly once") != std::string::npos);
+  assert(page.find("master password") != std::string::npos);
+  // Echoes the transport fingerprint for out-of-band comparison.
+  assert(page.find("AA:BB:CC:DD") != std::string::npos);
+
+  // A routine unlock page must not be red, so the two can never be confused.
+  auto vault_dir = std::filesystem::temp_directory_path() / "alfie_http_init_look_vault";
+  std::filesystem::remove_all(vault_dir);
+  prepare_vault(vault_dir);
+  UnlockService unlock_service(vault_dir, "yuki");
+  auto unlock_token =
+      unlock_service.create_token({"account", "example.com", "yuki@example.com", "fill_password"});
+  auto unlock_page = unlock_service.handle({"GET", "/unlock/" + unlock_token, "", {}}).body;
+  assert(unlock_page.find("#450a0a") == std::string::npos);
+  assert(unlock_page.find("FIRST-TIME") == std::string::npos);
+
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(out);
+  std::filesystem::remove_all(vault_dir);
+}
+
+static void test_init_is_refused_once_a_vault_exists() {
+  auto dir = std::filesystem::temp_directory_path() / "alfie_http_init_twice";
+  auto out = std::filesystem::temp_directory_path() / "alfie_http_init_twice_out";
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(out);
+  init_vault(dir, "yuki", "master pass");
+
+  UnlockService service(dir, "");
+  auto token = service.create_init_token({"init", "", "", "init_vault"}, test_plan(out));
+  auto response = service.handle(
+      {"POST", "/init/" + token, "login=attacker&password=Attacker-Pass-1&confirm=Attacker-Pass-1",
+       {}});
+  assert(response.status == 409);
+  // The original credentials still stand.
+  assert(verify_credentials(dir, "yuki", "master pass"));
+  assert(!verify_credentials(dir, "attacker", "Attacker-Pass-1"));
+
+  std::filesystem::remove_all(dir);
+  std::filesystem::remove_all(out);
 }
 
 static void test_unlock_checks_credentials_stored_in_vault() {
@@ -223,13 +296,14 @@ static void test_store_into_uninitialized_vault_is_refused() {
 }
 
 int main() {
-  test_init_link_creates_vault_and_sets_credentials();
+  test_init_link_creates_vault_ca_and_credentials();
+  test_setup_page_is_visually_distinct_and_shows_fingerprint();
+  test_init_is_refused_once_a_vault_exists();
   test_unlock_checks_credentials_stored_in_vault();
   test_store_into_uninitialized_vault_is_refused();
   test_token_form_does_not_expose_secret();
   test_submit_unlocks_once_without_returning_secret();
   test_store_token_adds_new_secret_without_echoing_value();
-  test_store_file_token_encrypts_file_and_removes_source();
   test_bad_login_does_not_consume_token();
   test_http_parse_and_render();
   std::cout << "HTTP unlock tests passed\n";

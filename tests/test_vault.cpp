@@ -358,7 +358,33 @@ static void test_stored_argon2_params_are_used() {
   std::filesystem::remove_all(dir);
 }
 
+static void test_vault_directories_are_private_to_the_owner() {
+  auto dir = std::filesystem::temp_directory_path() / "alfie_vault_cpp_perms";
+  std::filesystem::remove_all(dir);
+  SecureBuffer passphrase("correct horse battery staple");
+  init_vault(dir, "yuki", passphrase);
+
+  const auto owner_only = [](const std::filesystem::path& p) {
+    const auto perms = std::filesystem::status(p).permissions();
+    return (perms & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) ==
+           std::filesystem::perms::none;
+  };
+  assert(owner_only(dir));
+  assert(owner_only(dir / "vault.meta"));
+
+  {
+    SecureBuffer open_pass("correct horse battery staple");
+    VaultSession session = VaultSession::open(dir, "yuki", open_pass);
+    session.put("account", "example.com", "u", SecureBuffer(std::string(R"({"secret":"s"})")));
+  }
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(dir))
+    assert(owner_only(entry.path()));
+
+  std::filesystem::remove_all(dir);
+}
+
 int main() {
+  test_vault_directories_are_private_to_the_owner();
   test_vault_must_be_initialized_before_use();
   test_init_vault_sets_credentials_and_is_not_repeatable();
   test_init_vault_rejects_empty_credentials();

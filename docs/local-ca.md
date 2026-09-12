@@ -1,66 +1,44 @@
 # Local CA for IP HTTPS
 
-Use this when Alfie is accessed by IP address instead of a DNS name.
+Use this when Alfie is reached by IP address instead of a DNS name.
 
-## Create CA
-
-```bash
-./scripts/gen-local-ca.sh ./certs/ca "Alfie Local CA"
-```
-
-Outputs:
-
-- `./certs/ca/alfie-local-ca-cert.pem` — install/trust this on iPhone/Mac
-- `./certs/ca/alfie-local-ca-key.pem` — keep private; do not install on devices
-
-## Create IP server certificate signed by CA
+The CA is created by [first-time vault setup](first-time-init.md), not by a script. It is
+generated in memory and its private key goes straight into the vault; it never touches disk.
 
 ```bash
-./scripts/gen-ca-ip-server-cert.sh <server-ip> ./certs/server \
-  ./certs/ca/alfie-local-ca-cert.pem \
-  ./certs/ca/alfie-local-ca-key.pem
+./build/alfie-vault serve-init-tls ./vault <server-ip> <bind-host> <port> ./certs
 ```
 
-Outputs:
+Setup produces:
 
-- `./certs/server/alfie-ip-cert.pem`
-- `./certs/server/alfie-ip-key.pem`
+- `./certs/alfie-local-ca-cert.pem` -- install and trust this on iPhone/Mac. Public.
+- `./certs/alfie-ip-cert.pem` -- server certificate carrying an IP subjectAltName.
+- `./certs/alfie-ip-key.pem` -- server private key, 0600.
 
-Run Alfie TLS with those files:
-
-```bash
-./build/alfie-vault serve-unlock-tls ./vault yuki 0.0.0.0 18443 \
-  ./certs/server/alfie-ip-cert.pem ./certs/server/alfie-ip-key.pem \
-  account example.com yuki@example.com fill_password
-```
-
-Then open:
-
-```text
-https://<server-ip>:18443/unlock/<token>
-```
+The CA **private** key is not in that list. It lives encrypted inside the vault, and reading it
+back needs the master password, which means a human at an unlock page.
 
 ## Trust behavior
 
-This encrypts the HTTPS connection. iPhone/Mac will trust it only after the CA certificate is installed and enabled as trusted.
+Installing the CA certificate is what makes the browser stop warning. Until then the connection
+is still encrypted, but its identity is unverified -- which is why first-time setup prints a
+fingerprint to compare out of band.
 
-Trust the CA certificate, not the server private key. Keep both private keys off chat and out of backups unless encrypted.
+Trust the CA *certificate*. There is no CA private key to protect on disk any more, and the
+server private key should never leave the box.
 
-## Store CA private key into vault, then remove it from disk
-
-Preferred flow:
+## Serving with the generated pair
 
 ```bash
-./scripts/start-ca-key-store-link.sh <server-ip> ./vault yuki 0.0.0.0 18443 ./private/ca-setup
+./build/alfie-vault serve-unlock-tls ./vault yuki 0.0.0.0 18443 \
+  ./certs/alfie-ip-cert.pem ./certs/alfie-ip-key.pem \
+  account example.com yuki@example.com fill_password
 ```
 
-It will:
+Then open `https://<server-ip>:18443/unlock/<token>`.
 
-1. generate the local CA
-2. generate the IP HTTPS server certificate
-3. print the CA certificate path to install/trust on iPhone/Mac
-4. print a one-time HTTPS `/store-file/<token>` link
-5. after Yuki enters vault login + master password, encrypt the CA private key into the vault
-6. wipe and remove the plaintext CA private key file from disk
+## Standalone self-signed certificate
 
-The CA certificate is public and can be shared. The CA private key must never be sent in chat.
+`scripts/gen-ip-cert.sh` still generates a plain self-signed IP certificate with no CA involved.
+It is useful for throwaway testing only; it writes a private key to disk and browsers will warn
+on every connection.

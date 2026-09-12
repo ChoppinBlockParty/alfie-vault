@@ -22,6 +22,10 @@ credential:
 So the master password is present on the remote box only for the brief window of a single
 authorized task, and the blast radius of any one unlock is one record — not the whole vault.
 
+Before any of that, the vault has to exist. Creating it is a separate one-time act that sets the
+login and master password and generates the local CA: see
+[first-time setup](docs/first-time-init.md).
+
 ## Design
 
 - Runtime vault is a directory of small encrypted records, not one big decrypted JSON.
@@ -60,13 +64,42 @@ This repo uses CMake with Ninja. Local tool packages are extracted under `third_
 
 ## Vault metadata
 
-The first write creates `vault.meta` with:
+First-time setup creates `vault.meta` with:
 
-- format marker: `ALFIEVAULT1`
+- format marker: `ALFIEVAULT2`
 - random vault salt
 - Argon2id cost parameters
+- login verifier and master-password verifier
 
-The salt is not secret. It makes two vaults with the same master password derive different keys and record IDs.
+The salt is not secret. It makes two vaults with the same master password derive different keys
+and record IDs.
+
+The verifiers are HMACs under the master key, so neither the login nor the password can be
+recovered from them. They let an unlock tell "wrong master password" apart from "no such
+record" — without them, a typo at store time silently writes a record that can never be found
+again. Legacy `ALFIEVAULT1` vaults have no verifiers and fall back to the login given at server
+start.
+
+Nothing creates a vault implicitly. Reads and writes against an uninitialized directory fail
+rather than bringing an empty vault into existence.
+
+## First-time setup
+
+The vault does not exist until it is created, and creating it is deliberately its own step:
+
+```bash
+./build/alfie-vault serve-init-tls ./vault <server-ip> <bind-host> <port> ./certs
+```
+
+It refuses to start if a vault already exists, serves a red one-time `/init/<token>` page under a
+**one-off in-memory certificate**, and prints that certificate's SHA-256 fingerprint for you to
+compare against what the browser shows — the setup page is the only page that asks for the
+password protecting everything, and the only one reached by clicking through a warning, so it is
+verified out of band rather than by looks alone.
+
+On submit it creates the vault, generates the CA in memory, stores the CA private key inside the
+vault, writes the CA certificate plus a CA-signed server certificate/key, and exits. The CA
+private key never touches disk. Details in [docs/first-time-init.md](docs/first-time-init.md).
 
 ## Encrypted IPC
 
@@ -77,7 +110,7 @@ Vault-to-browser-worker handoff uses two layers:
 
 See `docs/encrypted-ipc.md`.
 
-## HTTP unlock server
+## HTTPS unlock server
 
 The unlock server is HTTPS-only; there is no plaintext-HTTP server in this build, because the
 page carries the vault master password.
@@ -96,17 +129,11 @@ It can also create a one-time `/store/<token>` page for adding new secrets witho
 
 The store page accepts login + vault password + secret JSON, encrypts the new chunk, and never echoes the secret.
 
-Without DNS, generate an IP-address certificate:
+Both certificates come from first-time setup, which signs them with the CA it stores in the
+vault. Browsers trust them only after `alfie-local-ca-cert.pem` is installed and trusted on the
+device.
 
-```bash
-./scripts/gen-local-ca.sh ./certs/ca "Alfie Local CA"
-./scripts/gen-ca-ip-server-cert.sh 127.0.0.1 ./certs/server \
-  ./certs/ca/alfie-local-ca-cert.pem ./certs/ca/alfie-local-ca-key.pem
-```
-
-It encrypts HTTPS traffic, but browsers trust it only after the CA certificate is installed and trusted.
-
-See `docs/http-unlock-server.md` and `docs/local-ca.md`.
+See `docs/first-time-init.md`, `docs/http-unlock-server.md` and `docs/local-ca.md`.
 
 ## C++ style
 

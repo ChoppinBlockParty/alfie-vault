@@ -23,13 +23,11 @@ int usage() {
       << "  alfie-vault init-vault <vault-dir> <login>\n"
       << "  alfie-vault put-account <vault-dir> <domain> <username>\n"
       << "  alfie-vault get-account <vault-dir> <domain> <username>\n"
-      << "  alfie-vault serve-init-tls <vault-dir> <login-hint> <host> <port> <cert> <key>\n"
+      << "  alfie-vault serve-init-tls <vault-dir> <server-ip> <host> <port> <output-dir>\n"
       << "  alfie-vault serve-unlock-tls <vault-dir> <login> <host> <port> <cert> <key> "
          "<purpose> <domain> <account> <action>\n"
       << "  alfie-vault serve-store-tls <vault-dir> <login> <host> <port> <cert> <key> "
          "<purpose> <domain> <account> <action>\n"
-      << "  alfie-vault serve-store-file-tls <vault-dir> <login> <host> <port> <cert> "
-         "<key> <purpose> <domain> <account> <action> <source-file>\n"
       << "\n"
       << "Secrets are read from stdin, never from argv: argv is visible process-wide via\n"
       << "/proc and ps. init-vault and put-account read the master password as the first line\n"
@@ -142,15 +140,56 @@ int main(int argc, char** argv) {
       return 0;
     }
     if (cmd == "serve-init-tls") {
-      if (argc != 8)
+      if (argc != 7)
         return usage();
-      UnlockService service(argv[2], argv[3]);
+      const std::filesystem::path vault_dir = argv[2];
+      const std::string server_ip = argv[3];
+      const std::string bind_host = argv[4];
+      const int port = std::stoi(argv[5]);
+      const std::filesystem::path output_dir = argv[6];
+
+      // Refuse to even start against a live vault. The setup page must be unreachable whenever
+      // a vault exists, not merely fail once someone has typed a password into it.
+      if (alfie::vault_initialized(vault_dir)) {
+        std::cerr << "error: vault already initialized at " << vault_dir << "\n"
+                  << "First-time setup can only run once. Nothing was served.\n";
+        return 1;
+      }
+
+      // One-off certificate: generated in memory, never written to disk, discarded on exit.
+      alfie::GeneratedCertificate ephemeral = alfie::generate_ephemeral_certificate(bind_host);
+      const std::string fingerprint =
+          alfie::certificate_fingerprint_sha256(ephemeral.certificate_pem);
+
+      UnlockService service(vault_dir, "");
+      service.set_transport_fingerprint(fingerprint);
+      alfie::InitPlan plan;
+      plan.output_dir = output_dir;
+      plan.server_ip = server_ip;
       UnlockRequestSpec spec{"init", "", "", "init_vault"};
-      auto token = service.create_init_token(spec);
-      std::cout << "vault setup link: https://" << argv[4] << ":" << argv[5] << "/init/" << token
+      auto token = service.create_init_token(spec, plan);
+
+      std::cout << "\n"
+                << "==========================================================\n"
+                << "  FIRST-TIME VAULT SETUP - this runs exactly once\n"
+                << "==========================================================\n"
+                << "\n"
+                << "Your browser will warn that this certificate is untrusted.\n"
+                << "That is expected: no CA exists yet. Before typing anything,\n"
+                << "check that the browser shows this exact fingerprint.\n"
+                << "\n"
+                << "  SHA-256: " << fingerprint << "\n"
+                << "\n"
+                << "The setup page shows the same value. If they differ, you are\n"
+                << "not talking to this server - close the page.\n"
+                << "\n"
+                << "setup link: https://" << bind_host << ":" << port << "/init/" << token << "\n"
                 << "\n"
                 << std::flush;
-      return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
+
+      return alfie::run_https_unlock_server_in_memory(service, bind_host, port,
+                                                      ephemeral.certificate_pem,
+                                                      ephemeral.private_key_pem);
     }
     if (cmd == "serve-unlock-tls") {
       if (argc != 12)
@@ -170,17 +209,6 @@ int main(int argc, char** argv) {
       UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
       auto token = service.create_store_token(spec);
       std::cout << "store link: https://" << argv[4] << ":" << argv[5] << "/store/" << token << "\n"
-                << std::flush;
-      return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
-    }
-    if (cmd == "serve-store-file-tls") {
-      if (argc != 13)
-        return usage();
-      UnlockService service(argv[2], argv[3]);
-      UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
-      auto token = service.create_store_file_token(spec, argv[12]);
-      std::cout << "store file link: https://" << argv[4] << ":" << argv[5] << "/store-file/"
-                << token << "\n"
                 << std::flush;
       return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
     }

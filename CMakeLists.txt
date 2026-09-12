@@ -36,6 +36,7 @@ endif()
 
 add_library(alfie_vault_core
     src/secure_memory.cpp
+    src/ca.cpp
     src/vault.cpp
     src/http_unlock.cpp
     src/ipc_crypto.cpp
@@ -58,6 +59,10 @@ add_executable(alfie-vault src/main.cpp)
 target_link_libraries(alfie-vault PRIVATE alfie_vault_core)
 
 include(CTest)
+
+add_executable(test_ca tests/test_ca.cpp)
+target_link_libraries(test_ca PRIVATE alfie_vault_core)
+add_test(NAME ca COMMAND test_ca)
 
 add_executable(test_vault tests/test_vault.cpp)
 target_link_libraries(test_vault PRIVATE alfie_vault_core)
@@ -83,10 +88,9 @@ add_executable(test_http_unlock tests/test_http_unlock.cpp)
 target_link_libraries(test_http_unlock PRIVATE alfie_vault_core)
 add_test(NAME http_unlock COMMAND test_http_unlock)
 
+add_test(NAME init_smoke COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/init_smoke.py $<TARGET_FILE:alfie-vault>)
 add_test(NAME https_smoke COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/https_smoke.py $<TARGET_FILE:alfie-vault>)
 add_test(NAME gen_ip_cert COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_ip_cert.py)
-add_test(NAME gen_local_ca COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_local_ca.py)
-add_test(NAME gen_ca_ip_server_cert COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gen_ca_ip_server_cert.py)
 
 set(CLANG_TOOLS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/clang-tools")
 set(CLANG_ENV "LD_LIBRARY_PATH=${CLANG_TOOLS}/usr/lib/x86_64-linux-gnu")

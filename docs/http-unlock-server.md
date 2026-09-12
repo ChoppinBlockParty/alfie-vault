@@ -1,7 +1,17 @@
 # HTTPS unlock server
 
-The web unlock layer. It is HTTPS-only by design: the page carries the vault master password, so
-there is no plaintext-HTTP server in this build.
+The web unlock layer. It is HTTPS-only by design: every page carries the vault master password,
+so there is no plaintext-HTTP server in this build.
+
+## Pages
+
+| Page | Minted by | Asks for | Result |
+|---|---|---|---|
+| `/init/<token>` | `serve-init-tls` | login, password, confirm | Creates the vault and the CA. Red page, shown once. See [first-time-init.md](first-time-init.md). |
+| `/unlock/<token>` | `serve-unlock-tls` | login, password | Decrypts one record for one task |
+| `/store/<token>` | `serve-store-tls` | login, password, secret JSON | Encrypts one new record |
+
+A token is minted for exactly one mode and is rejected on any other path. Anything else is 404.
 
 ## What it does
 
@@ -45,23 +55,22 @@ After submit, the server encrypts the value into the vault chunk and returns onl
 
 ## Current limitation
 
-TLS server mode is implemented with OpenSSL (TLS 1.3 minimum) and requires a PEM certificate and
-private key. Production should use a real certificate, e.g. via Caddy/nginx reverse proxy or Let's Encrypt.
-
-If there is no DNS name, generate a local CA and an IP-address server certificate signed by that CA:
+TLS is implemented with OpenSSL at TLS 1.3 minimum and needs a PEM certificate and private key.
+[First-time setup](first-time-init.md) produces both, signed by the CA it stores in the vault:
 
 ```bash
-./scripts/gen-local-ca.sh ./certs/ca "Alfie Local CA"
-./scripts/gen-ca-ip-server-cert.sh 127.0.0.1 ./certs/server \
-  ./certs/ca/alfie-local-ca-cert.pem ./certs/ca/alfie-local-ca-key.pem
 ./build/alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 \
-  ./certs/server/alfie-ip-cert.pem ./certs/server/alfie-ip-key.pem \
+  ./certs/alfie-ip-cert.pem ./certs/alfie-ip-key.pem \
   account example.com yuki@example.com fill_password
 ```
 
-The server certificate includes an IP Subject Alternative Name. Browsers will trust it only after Yuki installs and trusts `alfie-local-ca-cert.pem` on the device. The connection is encrypted, but identity trust is private/manual instead of public-CA trusted.
+The server certificate carries an IP subjectAltName. Browsers trust it only after the CA
+certificate from setup is installed and trusted on the device; the connection is encrypted
+either way, but identity trust is private rather than public-CA trusted. A public DNS name plus
+a real certificate (Caddy, nginx, Let's Encrypt) is the alternative.
 
-The CLI still exists only for smoke testing. Real production secrets must not be passed through argv.
+The setup server is the one exception: it serves under a one-off in-memory certificate, verified
+by comparing its fingerprint with the value printed on the box's terminal.
 
 ## Next integration
 

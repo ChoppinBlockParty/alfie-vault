@@ -44,9 +44,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 Run a single test: `ctest --test-dir build -R vault --output-on-failure`, or invoke the binary
-directly (`./build/test_vault`). CTest names: `vault`, `ipc_crypto`, `ipc_transport`,
-`corruption`, `secure_memory`, `http_unlock`, `https_smoke`, `gen_ip_cert`, `gen_local_ca`,
-`gen_ca_ip_server_cert`.
+directly (`./build/test_vault`). CTest names: `ca`, `vault`, `ipc_crypto`, `ipc_transport`,
+`corruption`, `secure_memory`, `http_unlock`, `init_smoke`, `https_smoke`, `gen_ip_cert`.
 
 ### Toolchain caveat
 
@@ -103,15 +102,38 @@ valid for the one token/domain/action it was minted for. `ReplayGuard` rejects r
 **3. `ipc_transport.{hpp,cpp}` — the socket guard.** Unix domain socket only: `0700` runtime dir,
 `0600` socket, peer UID verified via `SO_PEERCRED`. Deliberately separate from the crypto layer.
 
-**4. `http_unlock.{hpp,cpp}` — the one-time web unlock/store server.** This is the layer that
-implements the primary use case above. Hand-rolled HTTP parsing and a small OpenSSL TLS server (no
-framework). `UnlockService` mints single-use, TTL-bound tokens in
-three modes — unlock (`/unlock/<token>`), store a pasted secret (`/store/<token>`), and store a file
-(`/store-file/<token>`, used to move a CA private key into the vault and wipe it from disk). A token
-is checked for `used`, mode match, and expiry on both GET and POST, and marked used after submit.
-The pages are mobile-friendly inline HTML. `UnlockService::handle_submit` currently records only
-metadata in `last_delivery_` (token/domain/account/action/secret size) — wiring it to the encrypted
-IPC layer above is the intended next step.
+**4. `http_unlock.{hpp,cpp}` — the one-time web server.** This is the layer that implements the
+primary use case above. Hand-rolled HTTP parsing and a small OpenSSL TLS server (no framework).
+`UnlockService` mints single-use, TTL-bound tokens in three modes (`UnlockMode`) — `/init/<token>`
+(first-time setup), `/unlock/<token>` (decrypt one record), `/store/<token>` (encrypt a pasted
+secret). A token is minted for exactly one mode and rejected on any other path; `live_token()` is
+the single place that checks existence, `used`, mode match and expiry, on both GET and POST.
+Pages are mobile-friendly inline HTML. `handle_submit` records only metadata in `last_delivery_`
+(token/domain/account/action/secret size) for the unlock path — wiring that to the encrypted IPC
+layer above is the intended next step.
+
+**5. `ca.{hpp,cpp}` — in-memory X.509.** Generates the CA, CA-signed IP server certificates, and
+the one-off setup certificate. Private keys are never serialized to disk by this module: they
+exist as an `EVP_PKEY` inside the call and leave only as PEM bytes in a `SecureBuffer`, so callers
+can put them straight into the vault. `write_private_file()` creates 0600 files with `open(2)`
+rather than widening permissions after the fact.
+
+### First-time setup
+
+`serve-init-tls` is the bootstrap and has rules the other paths do not. It **refuses to start**
+if `vault.meta` exists (the red page must be unreachable whenever a vault exists, not merely
+rejected after a password is typed). It serves under a one-off certificate generated in memory by
+`generate_ephemeral_certificate()` and never written to disk, prints that certificate's SHA-256
+fingerprint to the terminal, and the page echoes the same value — out-of-band comparison is the
+real anti-phishing defense, since no CA is trusted yet and the user is clicking through a
+warning. On submit it creates the vault, generates the CA in memory, stores the CA private key in
+the vault, writes the CA cert plus a CA-signed server cert/key, sets `finished_`, and the serve
+loop exits. See `docs/first-time-init.md`.
+
+The threat here is phishing, not forgery: re-keying a live vault is already impossible, but an
+attacker running their own empty vault can harvest a master password from a convincing setup
+page. Keep the fingerprint echo, the red palette, and the refuse-to-start check intact — they are
+load-bearing, and the tests assert all three.
 
 ## Conventions and constraints
 
@@ -122,8 +144,13 @@ IPC layer above is the intended next step.
   secret value; the unlock pages report success only.
 - **Keep the unlock human-gated.** There is no plaintext-HTTP server in this build: the unlock
   page carries a master password, so every `serve-*` subcommand is TLS-only. On an IP-only host
-  that means the local-CA flow in `docs/local-ca.md`. Tokens are single-use and TTL-bound (`UnlockRequestSpec`
+  the certificates come from first-time setup (`docs/first-time-init.md`). Tokens are single-use and TTL-bound (`UnlockRequestSpec`
   defaults to 300s) — treat both as load-bearing.
+- **The vault never springs into existence.** `init_vault()` is the only thing that creates
+  `vault.meta`, and it throws if one exists. Reads and writes call a strict meta read that throws
+  when the vault is absent — a typo'd vault path must fail, not become a new empty vault. The
+  minimum master password length (`kMinimumMasterPasswordLength`) is enforced at init because the
+  password can never be changed afterwards.
 - **No production secrets through argv.** All CLI subcommands read secrets from stdin (first line
   = master password, echo off on a TTY); argv is visible OS-wide. `get-account` prints a
   decrypted record and is gated behind `ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1` — a test fixture,

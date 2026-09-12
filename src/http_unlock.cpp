@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
+#include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <sys/socket.h>
@@ -188,50 +189,16 @@ std::string read_http_tls(SSL* ssl) {
   return raw;
 }
 
-SecureBuffer read_file_secret(const std::filesystem::path& path) {
-  std::ifstream in(path, std::ios::binary | std::ios::ate);
-  if (!in) {
-    throw CryptoError("source secret file not found");
-  }
-  const auto size = in.tellg();
-  if (size < 0)
-    throw CryptoError("cannot size source secret file");
-  in.seekg(0);
-  // Sized up front so the contents are read straight into secure memory, never staged in a
-  // growing std::string on the normal heap.
-  SecureBuffer secret(static_cast<size_t>(size));
-  if (size > 0)
-    in.read(reinterpret_cast<char*>(secret.data()), size);
-  if (!in)
-    throw CryptoError("cannot read source secret file");
-  return secret;
-}
-
-void wipe_and_remove_file(const std::filesystem::path& path) {
-  std::error_code ec;
-  auto size = std::filesystem::file_size(path, ec);
-  if (!ec) {
-    std::ofstream out(path, std::ios::binary | std::ios::in);
-    std::string zeros(8192, '\0');
-    while (size > 0 && out) {
-      const auto n = std::min<uintmax_t>(size, zeros.size());
-      out.write(zeros.data(), static_cast<std::streamsize>(n));
-      size -= n;
-    }
-    out.flush();
-  }
-  std::filesystem::remove(path, ec);
-}
 }  // namespace
 
 UnlockService::UnlockService(std::filesystem::path vault_dir, std::string expected_login)
     : vault_dir_(std::move(vault_dir)), expected_login_(std::move(expected_login)) {}
 
 std::string UnlockService::create_token_for(const UnlockRequestSpec& spec, UnlockMode mode,
-                                            std::filesystem::path source_file) {
+                                            InitPlan plan) {
   std::string token = random_token();
   tokens_[token] = TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, mode,
-                               std::move(source_file)};
+                               std::move(plan)};
   return token;
 }
 
@@ -243,13 +210,8 @@ std::string UnlockService::create_store_token(const UnlockRequestSpec& spec) {
   return create_token_for(spec, UnlockMode::Store);
 }
 
-std::string UnlockService::create_store_file_token(const UnlockRequestSpec& spec,
-                                                   std::filesystem::path source_file) {
-  return create_token_for(spec, UnlockMode::StoreFile, std::move(source_file));
-}
-
-std::string UnlockService::create_init_token(const UnlockRequestSpec& spec) {
-  return create_token_for(spec, UnlockMode::Init);
+std::string UnlockService::create_init_token(const UnlockRequestSpec& spec, InitPlan plan) {
+  return create_token_for(spec, UnlockMode::Init, std::move(plan));
 }
 
 // One place that decides whether a token may act: it must exist, be unused, be presented on the
@@ -270,7 +232,6 @@ HttpResponse UnlockService::handle(const HttpRequest& request) {
   };
   static constexpr Route kRoutes[] = {
       {"/unlock/", UnlockMode::Unlock},
-      {"/store-file/", UnlockMode::StoreFile},
       {"/store/", UnlockMode::Store},
       {"/init/", UnlockMode::Init},
   };
@@ -300,24 +261,40 @@ HttpResponse UnlockService::render_form(const std::string& token, UnlockMode mod
   std::string action_path = "/unlock/";
   std::string button = "Unlock once";
   if (init_mode) {
-    title = "Alfie Vault First-Time Setup";
+    title = "FIRST-TIME VAULT SETUP";
     action_path = "/init/";
     button = "Create vault";
-  } else if (mode == UnlockMode::StoreFile) {
-    title = "Alfie Vault Store";
-    action_path = "/store-file/";
-    button = "Store once";
   } else if (mode == UnlockMode::Store) {
     title = "Alfie Vault Store";
     action_path = "/store/";
     button = "Store once";
   }
 
+  // The setup page is the highest-value phishing target in the system: it is the one page that
+  // asks for the password protecting everything, and the one page a user reaches by clicking
+  // through a certificate warning. So it does not look like the routine pages -- red, not
+  // slate -- and it says plainly what it is and when it should never appear.
+  const char* surface = init_mode ? "#450a0a" : "#0f172a";
+  const char* card = init_mode ? "#7f1d1d" : "#111827";
+  const char* border = init_mode ? "#f87171" : "#334155";
+  const char* accent = init_mode ? "#dc2626" : "#2563eb";
+  const char* field = init_mode ? "#1c0606" : "#020617";
+
   std::string meta_lines;
   if (init_mode) {
     meta_lines =
-        "<p class=\"meta\">This creates the vault and fixes its login and master password. "
-        "There is no recovery: if the master password is lost, every record is unreadable.</p>";
+        "<p class=\"warn\"><strong>You should see this page exactly once.</strong> "
+        "It creates a brand-new vault and sets the login and master password it will use "
+        "forever. If you have already set up Alfie, close this page now &mdash; someone may be "
+        "trying to collect your master password.</p>"
+        "<p class=\"meta\">There is no recovery. If the master password is lost, every record "
+        "in the vault is unreadable.</p>";
+    if (!transport_fingerprint_.empty()) {
+      meta_lines +=
+          "<p class=\"meta\">Check this against the fingerprint printed on the server's "
+          "terminal before typing anything:</p><p class=\"fp\">" +
+          html_escape(transport_fingerprint_) + "</p>";
+    }
   } else {
     meta_lines = "<p class=\"meta\">Domain: " + html_escape(spec.domain) +
                  "</p><p class=\"meta\">Action: " + html_escape(spec.action) + "</p>";
@@ -328,37 +305,50 @@ HttpResponse UnlockService::render_form(const std::string& token, UnlockMode mod
     extra_field =
         "<label>Confirm vault password <input name=\"confirm\" type=\"password\" "
         "autocomplete=\"new-password\"></label>";
-  } else if (mode == UnlockMode::StoreFile) {
-    extra_field =
-        "<p>No secret value will be shown. The server will encrypt the prepared file "
-        "after successful unlock, then remove it from disk.</p>";
   } else if (mode == UnlockMode::Store) {
     extra_field =
         "<label>Secret JSON <textarea name=\"value\" "
         "autocomplete=\"off\"></textarea></label><br>";
   }
   const std::string password_autocomplete = init_mode ? "new-password" : "current-password";
+  const std::string password_hint =
+      init_mode ? " <span class=\"hint\">(at least " +
+                      std::to_string(kMinimumMasterPasswordLength) + " characters)</span>"
+                : "";
+
   std::string body =
-      "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
-      "<title>" +
+      std::string(
+          "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+          "<meta name=\"viewport\" "
+          "content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
+          "<title>") +
       title +
       "</title><style>"
-      ":root{color-scheme:light dark}*{box-sizing:border-box}"
+      ":root{color-scheme:dark}*{box-sizing:border-box}"
       "body{margin:0;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe "
       "UI',Roboto,sans-serif;"
-      "background:#0f172a;color:#e5e7eb;display:flex;align-items:center;justify-content:center;"
-      "padding:24px}"
-      ".card{width:100%;max-width:520px;background:#111827;border:1px solid "
-      "#334155;border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.35)}"
-      "h1{font-size:1.4rem;margin:0 0 16px}.meta{color:#cbd5e1;font-size:.95rem;margin:8px 0}"
+      "background:" +
+      surface +
+      ";color:#f8fafc;display:flex;align-items:center;justify-content:center;padding:24px}"
+      ".card{width:100%;max-width:520px;background:" +
+      card + ";border:2px solid " + border +
+      ";border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.45)}"
+      "h1{font-size:1.4rem;margin:0 0 16px;letter-spacing:.02em}"
+      ".meta{color:#e2e8f0;font-size:.95rem;margin:8px 0}"
+      ".warn{background:#1c0606;border:1px solid #f87171;border-radius:12px;padding:14px;"
+      "margin:0 0 14px;color:#fecaca;font-size:.95rem;line-height:1.45}"
+      ".fp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.78rem;"
+      "word-break:break-all;background:#1c0606;border-radius:10px;padding:10px;color:#fecaca}"
+      ".hint{font-weight:400;color:#e2e8f0;font-size:.85rem}"
       "label{display:block;margin-top:16px;font-weight:600}"
       "input,textarea,button{width:100%;font:inherit;border-radius:12px;border:1px solid "
       "#475569;padding:14px;margin-top:8px}"
-      "input,textarea{background:#020617;color:#f8fafc}textarea{min-height:120px}"
-      "button{background:#2563eb;color:white;border:0;font-weight:700;margin-top:20px;cursor:"
-      "pointer}"
-      ".note{background:#172554;color:#bfdbfe;border-radius:12px;padding:12px;margin-top:16px}"
+      "input,textarea{background:" +
+      field +
+      ";color:#f8fafc}textarea{min-height:120px}"
+      "button{background:" +
+      accent +
+      ";color:white;border:0;font-weight:700;margin-top:20px;cursor:pointer}"
       "@media "
       "(max-width:540px){body{padding:12px;align-items:stretch}.card{border-radius:14px;padding:"
       "18px}}"
@@ -367,11 +357,68 @@ HttpResponse UnlockService::render_form(const std::string& token, UnlockMode mod
       html_escape(token) +
       "\"><label>Login <input name=\"login\" autocomplete=\"username\" autocapitalize=\"none\" "
       "spellcheck=\"false\" inputmode=\"text\"></label>"
-      "<label>Vault password <input name=\"password\" type=\"password\" "
-      "autocomplete=\"" +
+      "<label>Vault password" +
+      password_hint + " <input name=\"password\" type=\"password\" autocomplete=\"" +
       password_autocomplete + "\"></label>" + extra_field + "<button type=\"submit\">" + button +
       "</button></form></main></body></html>";
   return {200, "text/html; charset=utf-8", body};
+}
+
+// Creates the vault, then the CA, in that order. The CA private key is generated in memory and
+// stored in the vault it just created; it is never written to disk. Only public certificates
+// and the server key (0600) reach the filesystem.
+HttpResponse UnlockService::run_first_time_install(TokenRecord& record, const std::string& login,
+                                                  SecureBuffer& password) {
+  const InitPlan& plan = record.plan;
+  try {
+    SecureBuffer for_init(password.str());
+    init_vault(vault_dir_, login, for_init);
+
+    GeneratedCertificate ca =
+        generate_ca_certificate(plan.ca_common_name, 3650, plan.ca_rsa_bits);
+
+    {
+      SecureBuffer for_session(password.str());
+      VaultSession session = VaultSession::open(vault_dir_, login, for_session);
+      session.put(kCaKeyPurpose, kCaKeyDomain, kCaKeyAccount, ca.private_key_pem);
+    }
+
+    const auto ca_cert_path = plan.output_dir / "alfie-local-ca-cert.pem";
+    write_public_file(ca_cert_path, ca.certificate_pem);
+
+    std::string server_cert_path;
+    if (!plan.server_ip.empty()) {
+      GeneratedCertificate server = issue_ip_certificate(
+          plan.server_ip, ca.certificate_pem, ca.private_key_pem, 825, plan.server_rsa_bits);
+      write_public_file(plan.output_dir / "alfie-ip-cert.pem", server.certificate_pem);
+      write_private_file(plan.output_dir / "alfie-ip-key.pem", server.private_key_pem);
+      server_cert_path = (plan.output_dir / "alfie-ip-cert.pem").string();
+    }
+
+    record.used = true;
+    finished_ = true;
+
+    const std::string ca_fingerprint = certificate_fingerprint_sha256(ca.certificate_pem);
+    return {201, "text/html; charset=utf-8",
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Vault created</title></head><body "
+            "style=\"font-family:-apple-system,sans-serif;background:#450a0a;color:#f8fafc;"
+            "padding:24px\">"
+            "<h1>Vault created</h1><p>The login and master password are set, and the local CA "
+            "private key is stored inside the vault. This setup link is now dead.</p>"
+            "<p>Install and trust this CA certificate on your devices:<br><code>" +
+                html_escape(ca_cert_path.string()) +
+                "</code></p><p>Its SHA-256 fingerprint:<br><code style=\"word-break:break-all\">" +
+                html_escape(ca_fingerprint) + "</code></p>" +
+                (server_cert_path.empty()
+                     ? std::string{}
+                     : "<p>Server certificate for future unlock sessions:<br><code>" +
+                           html_escape(server_cert_path) + "</code></p>") +
+                "</body></html>"};
+  } catch (const std::exception&) {
+    return {409, "text/plain; charset=utf-8", "Vault setup failed"};
+  }
 }
 
 HttpResponse UnlockService::handle_submit(const std::string& token, const std::string& form_body,
@@ -403,14 +450,16 @@ HttpResponse UnlockService::handle_submit(const std::string& token, const std::s
     }
     if (!matched)
       return {400, "text/plain; charset=utf-8", "Passwords do not match"};
-    try {
-      init_vault(vault_dir_, login->second, master_password);
-    } catch (const std::exception&) {
-      return {409, "text/plain; charset=utf-8", "Vault setup failed"};
+    if (login->second.empty())
+      return {400, "text/plain; charset=utf-8", "Login must not be empty"};
+    // The master password can never be changed, so the one moment it is chosen is the only
+    // chance to refuse a hopeless one.
+    if (master_password.size() < kMinimumMasterPasswordLength) {
+      return {400, "text/plain; charset=utf-8",
+              "Master password must be at least " +
+                  std::to_string(kMinimumMasterPasswordLength) + " characters"};
     }
-    record->used = true;
-    return {201, "text/html; charset=utf-8",
-            "<html><body>Vault created. Login and master password are set.</body></html>"};
+    return run_first_time_install(*record, login->second, master_password);
   }
 
   if (!vault_initialized(vault_dir_))
@@ -434,13 +483,7 @@ HttpResponse UnlockService::handle_submit(const std::string& token, const std::s
 
   const auto spec = record->spec;
   try {
-    if (mode == UnlockMode::StoreFile) {
-      SecureBuffer secret_value = read_file_secret(record->source_file);
-      session->put(spec.purpose, spec.domain, spec.account, secret_value);
-      last_delivery_ =
-          DeliveredSecret{token, spec.domain, spec.account, spec.action, secret_value.size()};
-      wipe_and_remove_file(record->source_file);
-    } else if (mode == UnlockMode::Store) {
+    if (mode == UnlockMode::Store) {
       auto value = fields.find("value");
       if (value == fields.end() || value->second.empty())
         return {400, "text/plain; charset=utf-8", "Missing secret value"};
@@ -506,21 +549,10 @@ std::string http_response_text(const HttpResponse& response) {
   return out.str();
 }
 
-int run_https_unlock_server(UnlockService& service, const std::string& bind_host, int port,
-                            const std::filesystem::path& certificate_path,
-                            const std::filesystem::path& private_key_path, int max_requests) {
-  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
-  if (ctx == nullptr)
-    throw CryptoError("SSL_CTX_new failed");
-  SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
-  SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
-  if (SSL_CTX_use_certificate_file(ctx, certificate_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
-      SSL_CTX_use_PrivateKey_file(ctx, private_key_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
-      SSL_CTX_check_private_key(ctx) != 1) {
-    SSL_CTX_free(ctx);
-    throw CryptoError("TLS certificate/private key load failed");
-  }
+namespace {
 
+int serve_tls(SSL_CTX* ctx, UnlockService& service, const std::string& bind_host, int port,
+              int max_requests) {
   int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
   if (fd < 0) {
     SSL_CTX_free(ctx);
@@ -575,10 +607,65 @@ int run_https_unlock_server(UnlockService& service, const std::string& bind_host
     SSL_free(ssl);
     close(client);
     ++handled;
+    // A first-time setup session is served under a one-off certificate. Once the vault
+    // exists, that certificate and this process have done their single job.
+    if (service.finished())
+      break;
   }
   close(fd);
   SSL_CTX_free(ctx);
   return handled;
+}
+
+SSL_CTX* new_server_context() {
+  SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+  if (ctx == nullptr)
+    throw CryptoError("SSL_CTX_new failed");
+  SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
+  SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
+  return ctx;
+}
+
+}  // namespace
+
+int run_https_unlock_server(UnlockService& service, const std::string& bind_host, int port,
+                            const std::filesystem::path& certificate_path,
+                            const std::filesystem::path& private_key_path, int max_requests) {
+  SSL_CTX* ctx = new_server_context();
+  if (SSL_CTX_use_certificate_file(ctx, certificate_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
+      SSL_CTX_use_PrivateKey_file(ctx, private_key_path.c_str(), SSL_FILETYPE_PEM) != 1 ||
+      SSL_CTX_check_private_key(ctx) != 1) {
+    SSL_CTX_free(ctx);
+    throw CryptoError("TLS certificate/private key load failed");
+  }
+  return serve_tls(ctx, service, bind_host, port, max_requests);
+}
+
+int run_https_unlock_server_in_memory(UnlockService& service, const std::string& bind_host,
+                                      int port, const std::string& certificate_pem,
+                                      const SecureBuffer& private_key_pem, int max_requests) {
+  SSL_CTX* ctx = new_server_context();
+
+  BIO* cert_bio = BIO_new_mem_buf(certificate_pem.data(), static_cast<int>(certificate_pem.size()));
+  X509* cert = cert_bio == nullptr ? nullptr : PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
+  BIO* key_bio = BIO_new_mem_buf(private_key_pem.data(), static_cast<int>(private_key_pem.size()));
+  EVP_PKEY* key =
+      key_bio == nullptr ? nullptr : PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
+
+  const bool loaded = cert != nullptr && key != nullptr &&
+                      SSL_CTX_use_certificate(ctx, cert) == 1 &&
+                      SSL_CTX_use_PrivateKey(ctx, key) == 1 && SSL_CTX_check_private_key(ctx) == 1;
+
+  X509_free(cert);
+  EVP_PKEY_free(key);
+  BIO_free(cert_bio);
+  BIO_free(key_bio);
+
+  if (!loaded) {
+    SSL_CTX_free(ctx);
+    throw CryptoError("in-memory TLS certificate/private key load failed");
+  }
+  return serve_tls(ctx, service, bind_host, port, max_requests);
 }
 
 }  // namespace alfie

@@ -91,8 +91,20 @@ std::string nul_join(std::initializer_list<std::string> fields) {
 
 void write_file(const std::filesystem::path& p, const std::vector<unsigned char>& data) {
   std::filesystem::create_directories(p.parent_path());
+  for (auto dir = p.parent_path(); dir.has_relative_path(); dir = dir.parent_path()) {
+    std::error_code ec;
+    std::filesystem::permissions(dir, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, ec);
+    if (dir.filename() == "records")
+      break;
+  }
   std::ofstream out(p, std::ios::binary | std::ios::trunc);
   out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+  out.flush();
+  std::error_code ec;
+  std::filesystem::permissions(
+      p, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+      std::filesystem::perm_options::replace, ec);
 }
 
 std::vector<unsigned char> read_file(const std::filesystem::path& p) {
@@ -427,6 +439,9 @@ void init_vault(const std::filesystem::path& root, const std::string& login,
   const auto login_verifier = hmac_hex(keys.index_key, kLoginVerifierLabel + login);
 
   std::filesystem::create_directories(root);
+  // The vault directory is private to this user: record filenames are HMACs, but their count,
+  // sizes and timestamps still leak how the vault is used.
+  std::filesystem::permissions(root, std::filesystem::perms::owner_all);
   const auto meta_path = meta_path_for(root);
   std::ofstream out(meta_path, std::ios::binary | std::ios::trunc);
   if (!out)
