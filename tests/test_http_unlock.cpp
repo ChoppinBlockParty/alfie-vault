@@ -186,9 +186,10 @@ static void test_init_link_creates_vault_ca_and_credentials() {
 
   // The setup link is one-time, and the service reports that it is done serving.
   assert(service.finished());
-  auto replay = service.handle(
-      {"POST", "/init/" + token, "login=yuki&password=Other-Password-1&confirm=Other-Password-1",
-       {}});
+  auto replay = service.handle({"POST",
+                                "/init/" + token,
+                                "login=yuki&password=Other-Password-1&confirm=Other-Password-1",
+                                {}});
   assert(replay.status == 410);
 
   std::filesystem::remove_all(dir);
@@ -241,9 +242,10 @@ static void test_init_is_refused_once_a_vault_exists() {
 
   UnlockService service(dir, "");
   auto token = service.create_init_token({"init", "", "", "init_vault"}, test_plan(out));
-  auto response = service.handle(
-      {"POST", "/init/" + token, "login=attacker&password=Attacker-Pass-1&confirm=Attacker-Pass-1",
-       {}});
+  auto response = service.handle({"POST",
+                                  "/init/" + token,
+                                  "login=attacker&password=Attacker-Pass-1&confirm=Attacker-Pass-1",
+                                  {}});
   assert(response.status == 409);
   // The original credentials still stand.
   assert(verify_credentials(dir, "yuki", "master pass"));

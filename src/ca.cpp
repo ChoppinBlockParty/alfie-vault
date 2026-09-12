@@ -195,8 +195,7 @@ GeneratedCertificate generate_ephemeral_certificate(const std::string& ip_addres
   if (X509_set_issuer_name(cert.get(), X509_get_subject_name(cert.get())) != 1)
     throw CryptoError("cannot set issuer");
   add_extension(cert.get(), cert.get(), NID_basic_constraints, "critical,CA:FALSE");
-  add_extension(cert.get(), cert.get(), NID_key_usage,
-                "critical,digitalSignature,keyEncipherment");
+  add_extension(cert.get(), cert.get(), NID_key_usage, "critical,digitalSignature,keyEncipherment");
   add_extension(cert.get(), cert.get(), NID_ext_key_usage, "serverAuth");
   add_extension(cert.get(), cert.get(), NID_subject_alt_name, "IP:" + ip_address);
 

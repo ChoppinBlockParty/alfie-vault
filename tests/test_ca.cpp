@@ -36,8 +36,8 @@ bool is_certificate_authority(X509* cert) {
 
 bool has_ip_san(X509* cert, const std::string& ip) {
   bool found = false;
-  auto* names = static_cast<GENERAL_NAMES*>(
-      X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
+  auto* names =
+      static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
   if (names != nullptr) {
     for (int i = 0; i < sk_GENERAL_NAME_num(names); ++i) {
       const GENERAL_NAME* name = sk_GENERAL_NAME_value(names, i);
@@ -80,8 +80,8 @@ static void test_ca_is_self_signed_and_marked_as_a_ca() {
 
 static void test_ip_certificate_is_signed_by_the_ca_and_carries_the_ip() {
   auto ca = generate_ca_certificate("Alfie Test CA", 30, kTestBits);
-  auto server = issue_ip_certificate("10.1.2.3", ca.certificate_pem, ca.private_key_pem, 30,
-                                     kTestBits);
+  auto server =
+      issue_ip_certificate("10.1.2.3", ca.certificate_pem, ca.private_key_pem, 30, kTestBits);
 
   X509* ca_cert = parse(ca.certificate_pem);
   X509* server_cert = parse(server.certificate_pem);
@@ -138,8 +138,8 @@ static void test_private_files_are_created_unreadable_to_others() {
   write_private_file(dir / "key.pem", ca.private_key_pem);
 
   const auto private_perms = std::filesystem::status(dir / "key.pem").permissions();
-  assert((private_perms & (std::filesystem::perms::group_all | std::filesystem::perms::others_all)) ==
-         std::filesystem::perms::none);
+  assert((private_perms & (std::filesystem::perms::group_all |
+                           std::filesystem::perms::others_all)) == std::filesystem::perms::none);
 
   assert(read_file(dir / "cert.pem") == ca.certificate_pem);
   assert(read_file(dir / "key.pem") == ca.private_key_pem.str());

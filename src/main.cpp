@@ -187,9 +187,8 @@ int main(int argc, char** argv) {
                 << "\n"
                 << std::flush;
 
-      return alfie::run_https_unlock_server_in_memory(service, bind_host, port,
-                                                      ephemeral.certificate_pem,
-                                                      ephemeral.private_key_pem);
+      return alfie::run_https_unlock_server_in_memory(
+          service, bind_host, port, ephemeral.certificate_pem, ephemeral.private_key_pem);
     }
     if (cmd == "serve-unlock-tls") {
       if (argc != 12)

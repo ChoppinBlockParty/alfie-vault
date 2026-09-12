@@ -29,8 +29,8 @@ GeneratedCertificate issue_ip_certificate(const std::string& ip_address,
 
 // Short-lived self-signed certificate for the first-time setup session only. It is never
 // written to disk and is discarded when the process exits.
-GeneratedCertificate generate_ephemeral_certificate(const std::string& ip_address,
-                                                    int days = 1, int rsa_bits = 2048);
+GeneratedCertificate generate_ephemeral_certificate(const std::string& ip_address, int days = 1,
+                                                    int rsa_bits = 2048);
 
 // Colon-separated uppercase SHA-256 of the DER certificate -- the same value browsers and
 // `openssl x509 -fingerprint -sha256` show, so a human can compare them out of band.
