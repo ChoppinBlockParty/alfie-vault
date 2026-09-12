@@ -40,6 +40,27 @@ endif()
 # Thread-local SIGPIPE handling uses the platform pthread API.
 find_package(Threads REQUIRED)
 
+# The HTML pages are Mustache templates under templates/, compiled into the
+# binary by scripts/embed_templates.cmake rather than read from disk at runtime.
+# See that script for why: a page that asks for the master password must be as
+# hard to alter as the executable serving it.
+file(GLOB TEMPLATE_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/templates/*.mustache)
+set(TEMPLATES_HEADER ${CMAKE_BINARY_DIR}/generated/templates.h)
+
+add_custom_command(
+    OUTPUT ${TEMPLATES_HEADER}
+    COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT=${TEMPLATES_HEADER}
+        "-DTEMPLATES=${TEMPLATE_SOURCES}"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_templates.cmake
+    DEPENDS ${TEMPLATE_SOURCES}
+        ${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_templates.cmake
+    COMMENT "Embedding templates/*.mustache"
+    VERBATIM
+)
+add_custom_target(alfie_templates DEPENDS ${TEMPLATES_HEADER})
+
 add_library(alfie_vault_core
     src/secure_memory.cpp
     src/ca.cpp
@@ -48,6 +69,7 @@ add_library(alfie_vault_core
     src/ipc_crypto.cpp
     src/ipc_transport.cpp
 )
+add_dependencies(alfie_vault_core alfie_templates)
 
 target_include_directories(alfie_vault_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -55,6 +77,13 @@ target_include_directories(alfie_vault_core PUBLIC
     ${OPENSSL_ARCH_HEADERS}
     ${ARGON2_HEADERS}
 )
+
+# The generated header and the Mustache renderer are implementation details of
+# http_unlock.cpp; nothing outside the library includes either.
+target_include_directories(alfie_vault_core PRIVATE
+    ${CMAKE_BINARY_DIR}/generated)
+target_include_directories(alfie_vault_core SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mustache)
 
 target_link_libraries(alfie_vault_core PUBLIC ${ARGON2_LIB} ${SSL_LIB} ${CRYPTO_LIB} Threads::Threads)
 set_target_properties(alfie_vault_core PROPERTIES

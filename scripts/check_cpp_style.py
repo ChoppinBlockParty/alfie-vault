@@ -29,6 +29,19 @@ def main():
             errors.append(f"{path.relative_to(root)}: iostream in library source")
         if re.search(r"^\s*namespace alfie\s*\{", text, re.MULTILINE):
             errors.append(f"{path.relative_to(root)}: qualify out-of-line definitions")
+    # Mustache escapes {{value}} but not {{{value}}} or {{&value}}. These
+    # templates render the page that collects the vault login and master
+    # password, so an unescaped interpolation there is an injection point into
+    # exactly the page that must not have one. There is no current need for raw
+    # HTML in a value, so the safe form is the only form allowed.
+    for path in sorted((root / "templates").glob("*.mustache")):
+        text = path.read_text()
+        for marker, name in (("{{{", "triple-brace"), ("{{&", "ampersand")):
+            if marker in text:
+                errors.append(
+                    f"{path.relative_to(root)}: {name} interpolation bypasses "
+                    "HTML escaping"
+                )
     for folder in ("src", "tests"):
         for path in sorted((root / folder).glob("*")):
             if path.suffix not in (".h", ".cpp"):

@@ -13,6 +13,27 @@ so there is no plaintext-HTTP server in this build.
 
 A token is minted for exactly one mode and is rejected on any other path. Anything else is 404.
 
+## Page rendering
+
+The pages are [Mustache](https://mustache.github.io/) templates under `templates/`, rendered with
+the single-header renderer in `third_party/mustache/`:
+
+| Template | Page |
+|---|---|
+| `unlock_page.mustache` | the form, in all three modes |
+| `page_style.mustache` | the shared `<style>` block, pulled in as `{{>page_style}}` |
+| `init_complete.mustache` | the 201 page after first-time setup |
+| `outcome.mustache` | the page that closes a successful unlock or store |
+
+`scripts/embed_templates.cmake` compiles them into the binary at build time as
+`build/generated/templates.h`; nothing is read from disk while serving. That is deliberate. These
+pages ask for the master password, and the setup page is what the operator compares a certificate
+fingerprint against, so the markup should be no easier to alter than the executable. Editing a
+template and rebuilding is the supported way to change a page.
+
+Mustache escapes `{{value}}`, so every value interpolated into a page is HTML-escaped by
+construction. The unescaped forms `{{{value}}}` and `{{&value}}` fail `make style-check`.
+
 ## What it does
 
 1. Alfie creates a one-time token for one requested credential.

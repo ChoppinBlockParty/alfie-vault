@@ -1,0 +1,37 @@
+{{!
+  The page that asks for the vault login and master password. One template
+  serves all three modes; the palette is chosen by the caller so that the
+  first-time setup page cannot be mistaken for a routine unlock.
+}}<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>{{title}}</title>
+{{>page_style}}
+</head><body><main class="card">
+<h1>{{title}}</h1>
+{{#initMode}}
+<p class="warn"><strong>You should see this page exactly once.</strong> It creates a brand-new vault and sets the login and master password it will use forever. If you have already set up Alfie, close this page now &mdash; someone may be trying to collect your master password.</p>
+<p class="meta">There is no recovery. If the master password is lost, every record in the vault is unreadable.</p>
+{{#hasFingerprint}}
+<p class="meta">Check this against the fingerprint printed on the server's terminal before typing anything:</p>
+<p class="fp">{{transportFingerprint}}</p>
+{{/hasFingerprint}}
+{{/initMode}}
+{{^initMode}}
+<p class="meta">Domain: {{domain}}</p><p class="meta">Action: {{action}}</p>
+{{/initMode}}
+{{! The bot and the page share this identifier; it is not a password or an authorization factor. }}
+<p class="meta">Match this request code with the bot's message:</p>
+<p class="fp" style="font-size:32px;letter-spacing:0.15em">{{displayCode}}</p>
+<form method="post" action="{{actionPath}}{{token}}">
+<label>Login <input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" inputmode="text"></label>
+<label>Vault password{{#initMode}} <span class="hint">(at least {{minimumPasswordLength}} characters)</span>{{/initMode}} <input name="password" type="password" autocomplete="{{passwordAutocomplete}}"></label>
+{{#initMode}}
+<label>Confirm vault password <input name="confirm" type="password" autocomplete="new-password"></label>
+<label>One-time setup code from the terminal <input name="setup_code" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="off" required></label>
+<p class="meta">Two incorrect setup codes invalidate this link.</p>
+{{/initMode}}
+{{#storeMode}}
+<label>Secret JSON <textarea name="value" autocomplete="off"></textarea></label><br>
+{{/storeMode}}
+<button type="submit">{{button}}</button>
+</form></main></body></html>

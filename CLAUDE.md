@@ -58,7 +58,8 @@ This repo was developed on a Linux x86_64 box without root package-install permi
 dependencies are vendored under `third_party/` and hardcoded in `CMakeLists.txt` for that platform:
 
 - `third_party/argon2/usr/lib/x86_64-linux-gnu` (checked in), `third_party/libssl-dev/usr/include`
-- `third_party/catch2/` holds the Catch2 amalgamated release (checked in, platform-independent).
+- `third_party/catch2/` holds the Catch2 amalgamated release and `third_party/mustache/` the
+  single-header Mustache renderer (both checked in, both platform-independent).
 - `third_party/ninja/` and `third_party/clang-tools/` are **gitignored**. Build helpers prefer
   those tools when available and otherwise look on PATH.
 
@@ -113,7 +114,8 @@ primary use case above. Hand-rolled HTTP parsing and a small OpenSSL TLS server 
 (first-time setup), `/unlock/<token>` (decrypt one record), `/store/<token>` (encrypt a pasted
 secret). A token is minted for exactly one mode and rejected on any other path; `findLiveToken()` is
 the single place that checks existence, `used`, mode match and expiry, on both GET and POST.
-Pages are mobile-friendly inline HTML. `handleSubmit` records only metadata in `LastDelivery`
+Pages are mobile-friendly HTML rendered from the Mustache templates in `templates/` (see
+**Templates** below). `handleSubmit` records only metadata in `LastDelivery`
 (token/domain/account/action/secret size) for the unlock path — wiring that to the encrypted IPC
 layer above is the intended next step.
 
@@ -139,6 +141,29 @@ The threat here is phishing, not forgery: re-keying a live vault is already impo
 attacker running their own empty vault can harvest a master password from a convincing setup
 page. Keep the fingerprint echo, the red palette, and the refuse-to-start check intact — they are
 load-bearing, and the tests assert all three.
+
+### Templates
+
+The HTML pages live in `templates/*.mustache` and are **compiled into the binary** by
+`scripts/embed_templates.cmake`, which emits `build/generated/templates.h` as
+`alfie::tmpl::kUnlockPage` and friends. `http_unlock.cpp` is the only file that includes that
+header or `mustache.hpp`.
+
+They are embedded rather than read from disk at runtime on purpose. These are the pages that ask
+for the vault login and master password, and the setup page is what the operator checks a
+certificate fingerprint against; a `templates/` directory read at runtime would let anyone who can
+write to it rewrite that page -- drop the fingerprint, add a field, post the password elsewhere --
+without touching the binary. Adding a runtime template path would remove that property.
+
+Mustache escapes `{{value}}`, which is why there is no `htmlEscape` helper any more: every value
+substituted into a page is escaped by construction instead of by remembering to call a function.
+`{{{value}}}` and `{{&value}}` bypass that, so `make style-check` fails if either appears in a
+template. Keep it that way: an unescaped interpolation here is an injection point into the one
+page that must not have one.
+
+`unlock_page.mustache` serves all three modes; `{{#initMode}}`, `{{#storeMode}}` and
+`{{#hasFingerprint}}` select the parts that differ, and the palette arrives as data so that the
+red setup page and the slate unlock page cannot drift into looking alike.
 
 ## Conventions and constraints
 

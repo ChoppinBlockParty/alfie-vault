@@ -36,6 +36,14 @@ To move to a newer Catch2, replace the two files from the release assets of the
 [Catch2 release page](https://github.com/catchorg/Catch2/releases) and rebuild;
 nothing else in the build refers to a version.
 
+## Templates
+
+`templates/*.mustache` are embedded into the binary at build time by
+`scripts/embed_templates.cmake`, which writes `build/generated/templates.h`. The step is
+plain CMake, so building the library needs no extra interpreter, and it runs again
+whenever a template or the script changes. Editing a template and rebuilding is the only
+way to change a page: nothing reads the templates from disk at runtime.
+
 ## Formatting/tidy
 
 ```bash

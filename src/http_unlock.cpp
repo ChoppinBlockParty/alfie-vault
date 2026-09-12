@@ -6,6 +6,7 @@
 #include "http_unlock.h"
 #include "ca.h"
 #include "scoped_fd.h"
+#include "templates.h"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cctype>
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <mustache.hpp>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/err.h>
@@ -86,28 +88,23 @@ static SecureBuffer randomSixDigitCode() {
   return code;
 }
 
-static std::string htmlEscape(const std::string &s) {
-  std::string out;
-  for (char c : s) {
-    switch (c) {
-    case '&':
-      out += "&amp;";
-      break;
-    case '<':
-      out += "&lt;";
-      break;
-    case '>':
-      out += "&gt;";
-      break;
-    case '"':
-      out += "&quot;";
-      break;
-    default:
-      out += c;
-      break;
-    }
-  }
-  return out;
+/// Render one of the embedded templates.
+///
+/// Mustache escapes every {{value}} interpolation, so anything substituted
+/// into a page -- a domain, an account, a path, a fingerprint -- is
+/// HTML-escaped by construction rather than by remembering to call an escape
+/// function at each site.
+static std::string renderTemplate(std::string_view templateText,
+                                  const kainjow::mustache::data &data) {
+  kainjow::mustache::mustache page{std::string(templateText)};
+  std::string rendered = page.render(data);
+  // The templates are compiled into the binary, so this can only fire on a
+  // template that was edited into something invalid. Refusing is the only safe
+  // answer: a half-rendered page could drop the very warning it exists to
+  // show.
+  if (!page.is_valid())
+    throw CryptoError("template error: " + page.error_message());
+  return rendered;
 }
 
 static int hexValue(char c) {
@@ -511,127 +508,41 @@ HttpResponse UnlockService::renderForm(const std::string &token,
     button = "Store once";
   }
 
+  kainjow::mustache::data data;
+  data.set("title", title);
+  data.set("actionPath", actionPath);
+  data.set("token", token);
+  data.set("button", button);
+  data.set("displayCode", record->displayCode);
+  data.set("initMode", initMode);
+  data.set("storeMode", mode == UnlockMode::Store);
+  data.set("domain", spec.domain);
+  data.set("action", spec.action);
+  data.set("passwordAutocomplete",
+           initMode ? "new-password" : "current-password");
+  data.set("minimumPasswordLength",
+           std::to_string(kMinimumMasterPasswordLength));
+  // Only the setup page has a fingerprint to show, and only when the caller
+  // supplied one.
+  data.set("hasFingerprint", initMode && !this->transportFingerprint_.empty());
+  data.set("transportFingerprint", this->transportFingerprint_);
+
   // The setup page is the highest-value phishing target in the system: it is
   // the one page that asks for the password protecting everything, and the one
   // page a user reaches by clicking through a certificate warning. So it does
   // not look like the routine pages -- red, not slate -- and it says plainly
   // what it is and when it should never appear.
-  const char *surface = initMode ? "#450a0a" : "#0f172a";
-  const char *card = initMode ? "#7f1d1d" : "#111827";
-  const char *border = initMode ? "#f87171" : "#334155";
-  const char *accent = initMode ? "#dc2626" : "#2563eb";
-  const char *field = initMode ? "#1c0606" : "#020617";
+  data.set("surface", initMode ? "#450a0a" : "#0f172a");
+  data.set("card", initMode ? "#7f1d1d" : "#111827");
+  data.set("border", initMode ? "#f87171" : "#334155");
+  data.set("accent", initMode ? "#dc2626" : "#2563eb");
+  data.set("field", initMode ? "#1c0606" : "#020617");
 
-  std::string metaLines;
-  if (initMode) {
-    metaLines = "<p class=\"warn\"><strong>You should see this page exactly "
-                "once.</strong> "
-                "It creates a brand-new vault and sets the login and master "
-                "password it will use "
-                "forever. If you have already set up Alfie, close this page "
-                "now &mdash; someone may be "
-                "trying to collect your master password.</p>"
-                "<p class=\"meta\">There is no recovery. If the master "
-                "password is lost, every record "
-                "in the vault is unreadable.</p>";
-    if (!this->transportFingerprint_.empty()) {
-      metaLines += "<p class=\"meta\">Check this against the fingerprint "
-                   "printed on the server's "
-                   "terminal before typing anything:</p><p class=\"fp\">" +
-                   htmlEscape(this->transportFingerprint_) + "</p>";
-    }
-  } else {
-    metaLines = "<p class=\"meta\">Domain: " + htmlEscape(spec.domain) +
-                "</p><p class=\"meta\">Action: " + htmlEscape(spec.action) +
-                "</p>";
-  }
+  data.set("page_style", kainjow::mustache::partial(
+                             [] { return std::string(tmpl::kPageStyle); }));
 
-  // The bot and page share this identifier; it is not a password or
-  // authorization factor.
-  metaLines +=
-      "<p class=\"meta\">Match this request code with the bot's message:</p>"
-      "<p class=\"fp\" style=\"font-size:32px;letter-spacing:0.15em\">" +
-      record->displayCode + "</p>";
-
-  std::string extraField;
-  if (initMode) {
-    extraField =
-        "<label>Confirm vault password <input name=\"confirm\" "
-        "type=\"password\" "
-        "autocomplete=\"new-password\"></label>"
-        "<label>One-time setup code from the terminal "
-        "<input name=\"setup_code\" type=\"password\" inputmode=\"numeric\" "
-        "pattern=\"[0-9]{6}\" minlength=\"6\" maxlength=\"6\" "
-        "autocomplete=\"off\" required></label>"
-        "<p class=\"meta\">Two incorrect setup codes invalidate this link.</p>";
-  } else if (mode == UnlockMode::Store) {
-    extraField = "<label>Secret JSON <textarea name=\"value\" "
-                 "autocomplete=\"off\"></textarea></label><br>";
-  }
-  const std::string passwordAutocomplete =
-      initMode ? "new-password" : "current-password";
-  const std::string passwordHint =
-      initMode ? " <span class=\"hint\">(at least " +
-                     std::to_string(kMinimumMasterPasswordLength) +
-                     " characters)</span>"
-               : "";
-
-  std::string body =
-      std::string(
-          "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-          "<meta name=\"viewport\" "
-          "content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
-          "<title>") +
-      title +
-      "</title><style>"
-      ":root{color-scheme:dark}*{box-sizing:border-box}"
-      "body{margin:0;min-height:100vh;font-family:-apple-system,"
-      "BlinkMacSystemFont,'Segoe "
-      "UI',Roboto,sans-serif;"
-      "background:" +
-      surface +
-      ";color:#f8fafc;display:flex;align-items:center;justify-content:center;"
-      "padding:24px}"
-      ".card{width:100%;max-width:520px;background:" +
-      card + ";border:2px solid " + border +
-      ";border-radius:18px;padding:24px;box-shadow:0 20px 60px rgba(0,0,0,.45)}"
-      "h1{font-size:1.4rem;margin:0 0 16px;letter-spacing:.02em}"
-      ".meta{color:#e2e8f0;font-size:.95rem;margin:8px 0}"
-      ".warn{background:#1c0606;border:1px solid "
-      "#f87171;border-radius:12px;padding:14px;"
-      "margin:0 0 14px;color:#fecaca;font-size:.95rem;line-height:1.45}"
-      ".fp{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:."
-      "78rem;"
-      "word-break:break-all;background:#1c0606;border-radius:10px;padding:10px;"
-      "color:#fecaca}"
-      ".hint{font-weight:400;color:#e2e8f0;font-size:.85rem}"
-      "label{display:block;margin-top:16px;font-weight:600}"
-      "input,textarea,button{width:100%;font:inherit;border-radius:12px;border:"
-      "1px solid "
-      "#475569;padding:14px;margin-top:8px}"
-      "input,textarea{background:" +
-      field +
-      ";color:#f8fafc}textarea{min-height:120px}"
-      "button{background:" +
-      accent +
-      ";color:white;border:0;font-weight:700;margin-top:20px;cursor:pointer}"
-      "@media "
-      "(max-width:540px){body{padding:12px;align-items:stretch}.card{border-"
-      "radius:14px;padding:"
-      "18px}}"
-      "</style></head><body><main class=\"card\"><h1>" +
-      title + "</h1>" + metaLines + "<form method=\"post\" action=\"" +
-      actionPath + htmlEscape(token) +
-      "\"><label>Login <input name=\"login\" autocomplete=\"username\" "
-      "autocapitalize=\"none\" "
-      "spellcheck=\"false\" inputmode=\"text\"></label>"
-      "<label>Vault password" +
-      passwordHint +
-      " <input name=\"password\" type=\"password\" autocomplete=\"" +
-      passwordAutocomplete + "\"></label>" + extraField +
-      "<button type=\"submit\">" + button +
-      "</button></form></main></body></html>";
-  return {200, "text/html; charset=utf-8", body};
+  return {200, "text/html; charset=utf-8",
+          renderTemplate(tmpl::kUnlockPage, data)};
 }
 
 // Creates the vault, then the CA, in that order. The CA private key is
@@ -680,31 +591,14 @@ HttpResponse UnlockService::runFirstTimeInstall(TokenRecord &record,
 
     const std::string caFingerprint =
         certificateFingerprintSha256(ca.certificatePem);
-    return {
-        201, "text/html; charset=utf-8",
-        "<!doctype html><html><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" "
-        "content=\"width=device-width,initial-scale=1\">"
-        "<title>Vault created</title></head><body "
-        "style=\"font-family:-apple-system,sans-serif;background:#450a0a;color:"
-        "#f8fafc;"
-        "padding:24px\">"
-        "<h1>Vault created</h1><p>The login and master password are set, and "
-        "the local CA "
-        "private key is stored inside the vault. This setup link is now "
-        "dead.</p>"
-        "<p>Install and trust this CA certificate on your devices:<br><code>" +
-            htmlEscape(caCertPath.string()) +
-            "</code></p><p>Request code: <strong>" + record.displayCode +
-            "</strong></p><p>Verify the full SHA-256 fingerprint before "
-            "trusting the CA:<br><code style=\"word-break:break-all\">" +
-            htmlEscape(caFingerprint) + "</code></p>" +
-            (serverCertPath.empty()
-                 ? std::string{}
-                 : "<p>Server certificate for future unlock "
-                   "sessions:<br><code>" +
-                       htmlEscape(serverCertPath) + "</code></p>") +
-            "</body></html>"};
+    kainjow::mustache::data data;
+    data.set("caCertPath", caCertPath.string());
+    data.set("displayCode", record.displayCode);
+    data.set("caFingerprint", caFingerprint);
+    data.set("hasServerCert", !serverCertPath.empty());
+    data.set("serverCertPath", serverCertPath);
+    return {201, "text/html; charset=utf-8",
+            renderTemplate(tmpl::kInitComplete, data)};
   } catch (const std::exception &) {
     return {409, "text/plain; charset=utf-8", "Vault setup failed"};
   }
@@ -817,11 +711,10 @@ HttpResponse UnlockService::handleSubmit(const std::string &token,
                    });
     }
     record->used = true;
+    kainjow::mustache::data data;
+    data.set("unlocked", mode == UnlockMode::Unlock);
     return {200, "text/html; charset=utf-8",
-            mode == UnlockMode::Unlock
-                ? "<html><body>Unlocked. Credential delivered to local "
-                  "worker.</body></html>"
-                : "<html><body>Stored.</body></html>"};
+            renderTemplate(tmpl::kOutcome, data)};
   } catch (const std::exception &) {
     return {403, "text/plain; charset=utf-8", "Unlock failed"};
   }

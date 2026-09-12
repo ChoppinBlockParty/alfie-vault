@@ -1,0 +1,17 @@
+{{!
+  Shown once, after the first-time setup succeeds. It names what was written
+  and repeats the CA fingerprint so it can be checked before the certificate
+  is trusted on another device.
+}}<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vault created</title></head>
+<body style="font-family:-apple-system,sans-serif;background:#450a0a;color:#f8fafc;padding:24px">
+<h1>Vault created</h1>
+<p>The login and master password are set, and the local CA private key is stored inside the vault. This setup link is now dead.</p>
+<p>Install and trust this CA certificate on your devices:<br><code>{{caCertPath}}</code></p>
+<p>Request code: <strong>{{displayCode}}</strong></p>
+<p>Verify the full SHA-256 fingerprint before trusting the CA:<br><code style="word-break:break-all">{{caFingerprint}}</code></p>
+{{#hasServerCert}}
+<p>Server certificate for future unlock sessions:<br><code>{{serverCertPath}}</code></p>
+{{/hasServerCert}}
+</body></html>
