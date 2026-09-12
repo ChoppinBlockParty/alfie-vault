@@ -4,10 +4,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "../src/ca.h"
-#include <cassert>
+#include <catch_amalgamated.hpp>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <memory>
 #include <openssl/bio.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -16,26 +16,41 @@
 
 using namespace alfie;
 
-// Small keys throughout: these tests exercise certificate shape, not RSA
-// strength.
+/// Small keys throughout: these tests exercise certificate shape, not RSA
+/// strength.
 static constexpr int kTestBits = 2048;
 
-static X509 *parse(const std::string &pem) {
+struct X509Deleter {
+  void operator()(X509 *cert) const { X509_free(cert); }
+};
+struct PkeyDeleter {
+  void operator()(EVP_PKEY *key) const { EVP_PKEY_free(key); }
+};
+using CertPtr = std::unique_ptr<X509, X509Deleter>;
+using PkeyPtr = std::unique_ptr<EVP_PKEY, PkeyDeleter>;
+
+static CertPtr parse(const std::string &pem) {
   BIO *bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
-  X509 *cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+  CertPtr cert(PEM_read_bio_X509(bio, nullptr, nullptr, nullptr));
   BIO_free(bio);
-  assert(cert != nullptr);
+  REQUIRE(cert != nullptr);
   return cert;
 }
 
 static bool isCertificateAuthority(X509 *cert) {
-  BASIC_CONSTRAINTS *bc = static_cast<BASIC_CONSTRAINTS *>(
+  auto *bc = static_cast<BASIC_CONSTRAINTS *>(
       X509_get_ext_d2i(cert, NID_basic_constraints, nullptr, nullptr));
   const bool ca = bc != nullptr && bc->ca;
   BASIC_CONSTRAINTS_free(bc);
   return ca;
 }
 
+static bool isSelfSigned(X509 *cert) {
+  return X509_NAME_cmp(X509_get_issuer_name(cert),
+                       X509_get_subject_name(cert)) == 0;
+}
+
+/// True when `cert` carries `ip` as an IP subject alternative name.
 static bool hasIpSan(X509 *cert, const std::string &ip) {
   bool found = false;
   auto *names = static_cast<GENERAL_NAMES *>(
@@ -58,107 +73,113 @@ static bool hasIpSan(X509 *cert, const std::string &ip) {
   return found;
 }
 
+/// True when `cert` carries a signature made by `issuer`'s key.
+static bool verifiesUnder(X509 *cert, X509 *issuer) {
+  PkeyPtr issuerKey(X509_get_pubkey(issuer));
+  return X509_verify(cert, issuerKey.get()) == 1;
+}
+
 static std::string readFile(const std::filesystem::path &path) {
   std::ifstream in(path, std::ios::binary);
   return std::string((std::istreambuf_iterator<char>(in)),
                      std::istreambuf_iterator<char>());
 }
 
-static void testCaIsSelfSignedAndMarkedAsACa() {
-  auto ca = generateCaCertificate("Alfie Test CA", 30, kTestBits);
+struct TempDir {
+  std::filesystem::path path;
 
-  X509 *cert = parse(ca.certificatePem);
-  assert(isCertificateAuthority(cert));
-  // Self-signed: issuer and subject match, and it verifies under its own key.
-  assert(X509_NAME_cmp(X509_get_issuer_name(cert),
-                       X509_get_subject_name(cert)) == 0);
-  EVP_PKEY *pub = X509_get_pubkey(cert);
-  assert(X509_verify(cert, pub) == 1);
-  EVP_PKEY_free(pub);
-  X509_free(cert);
+  TempDir() {
+    this->path = std::filesystem::temp_directory_path() / "alfie_ca_write_test";
+    std::filesystem::remove_all(this->path);
+  }
 
-  // The key comes back as PEM inside a SecureBuffer, never as a plain string on
-  // the heap.
-  assert(ca.privateKeyPem.str().find("PRIVATE KEY") != std::string::npos);
+  ~TempDir() {
+    std::error_code ec;
+    std::filesystem::remove_all(this->path, ec);
+  }
+
+  TempDir(const TempDir &) = delete;
+  TempDir &operator=(const TempDir &) = delete;
+};
+
+TEST_CASE("The CA is self-signed and marked as a CA", "[ca][shape]") {
+  const GeneratedCertificate ca =
+      generateCaCertificate("Alfie Test CA", 30, kTestBits);
+  const CertPtr cert = parse(ca.certificatePem);
+
+  CHECK(isCertificateAuthority(cert.get()));
+  CHECK(isSelfSigned(cert.get()));
+  CHECK(verifiesUnder(cert.get(), cert.get()));
+  // The key comes back as PEM inside a SecureBuffer, never as a plain string
+  // on the heap.
+  CHECK_THAT(ca.privateKeyPem.str(),
+             Catch::Matchers::ContainsSubstring("PRIVATE KEY"));
 }
 
-static void testIpCertificateIsSignedByTheCaAndCarriesTheIp() {
-  auto ca = generateCaCertificate("Alfie Test CA", 30, kTestBits);
-  auto server = issueIpCertificate("10.1.2.3", ca.certificatePem,
-                                   ca.privateKeyPem, 30, kTestBits);
+TEST_CASE("An IP certificate is signed by the CA and carries the IP",
+          "[ca][ip]") {
+  const GeneratedCertificate ca =
+      generateCaCertificate("Alfie Test CA", 30, kTestBits);
+  const GeneratedCertificate server = issueIpCertificate(
+      "10.1.2.3", ca.certificatePem, ca.privateKeyPem, 30, kTestBits);
 
-  X509 *caCert = parse(ca.certificatePem);
-  X509 *serverCert = parse(server.certificatePem);
+  const CertPtr caCert = parse(ca.certificatePem);
+  const CertPtr serverCert = parse(server.certificatePem);
 
-  assert(!isCertificateAuthority(serverCert));
-  assert(hasIpSan(serverCert, "10.1.2.3"));
+  CHECK_FALSE(isCertificateAuthority(serverCert.get()));
+  CHECK(hasIpSan(serverCert.get(), "10.1.2.3"));
+  CHECK(verifiesUnder(serverCert.get(), caCert.get()));
 
-  // Verifies under the CA's public key, and not under an unrelated CA.
-  EVP_PKEY *caPub = X509_get_pubkey(caCert);
-  assert(X509_verify(serverCert, caPub) == 1);
-  EVP_PKEY_free(caPub);
+  SECTION("and not by an unrelated CA") {
+    const GeneratedCertificate other =
+        generateCaCertificate("Other CA", 30, kTestBits);
+    const CertPtr otherCert = parse(other.certificatePem);
 
-  auto other = generateCaCertificate("Other CA", 30, kTestBits);
-  X509 *otherCert = parse(other.certificatePem);
-  EVP_PKEY *otherPub = X509_get_pubkey(otherCert);
-  assert(X509_verify(serverCert, otherPub) != 1);
-  EVP_PKEY_free(otherPub);
-
-  X509_free(otherCert);
-  X509_free(serverCert);
-  X509_free(caCert);
+    CHECK_FALSE(verifiesUnder(serverCert.get(), otherCert.get()));
+  }
 }
 
-static void testEphemeralCertificateIsSelfSignedAndShortLived() {
-  auto ephemeral = generateEphemeralCertificate("127.0.0.1", 1, kTestBits);
-  X509 *cert = parse(ephemeral.certificatePem);
-  assert(!isCertificateAuthority(cert));
-  assert(hasIpSan(cert, "127.0.0.1"));
-  assert(X509_NAME_cmp(X509_get_issuer_name(cert),
-                       X509_get_subject_name(cert)) == 0);
-  X509_free(cert);
+TEST_CASE("The setup certificate is self-signed and not a CA",
+          "[ca][ephemeral]") {
+  const GeneratedCertificate ephemeral =
+      generateEphemeralCertificate("127.0.0.1", 1, kTestBits);
+  const CertPtr cert = parse(ephemeral.certificatePem);
+
+  CHECK_FALSE(isCertificateAuthority(cert.get()));
+  CHECK(hasIpSan(cert.get(), "127.0.0.1"));
+  CHECK(isSelfSigned(cert.get()));
 }
 
-static void testFingerprintMatchesOpensslFormatAndIsUnique() {
-  auto a = generateCaCertificate("A", 30, kTestBits);
-  auto b = generateCaCertificate("B", 30, kTestBits);
+TEST_CASE("The fingerprint matches the openssl rendering",
+          "[ca][fingerprint]") {
+  const GeneratedCertificate a = generateCaCertificate("A", 30, kTestBits);
+  const GeneratedCertificate b = generateCaCertificate("B", 30, kTestBits);
 
-  const auto fingerprint = certificateFingerprintSha256(a.certificatePem);
-  // 32 bytes rendered as uppercase hex pairs joined by colons.
-  assert(fingerprint.size() == (32 * 3) - 1);
-  assert(fingerprint[2] == ':');
-  for (char c : fingerprint)
-    assert(c == ':' || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F'));
+  const std::string fingerprint =
+      certificateFingerprintSha256(a.certificatePem);
 
-  assert(certificateFingerprintSha256(a.certificatePem) == fingerprint);
-  assert(certificateFingerprintSha256(b.certificatePem) != fingerprint);
+  // 32 bytes as uppercase hex pairs joined by colons: the exact shape the
+  // operator compares against the terminal, so it is asserted literally.
+  CHECK_THAT(fingerprint,
+             Catch::Matchers::Matches("([0-9A-F]{2}:){31}[0-9A-F]{2}"));
+  CHECK(fingerprint.size() == (32 * 3) - 1);
+  CHECK(certificateFingerprintSha256(a.certificatePem) == fingerprint);
+  CHECK(certificateFingerprintSha256(b.certificatePem) != fingerprint);
 }
 
-static void testPrivateFilesAreCreatedUnreadableToOthers() {
-  auto dir = std::filesystem::temp_directory_path() / "alfie_ca_write_test";
-  std::filesystem::remove_all(dir);
+TEST_CASE_METHOD(TempDir, "Private files are unreadable to others",
+                 "[ca][files]") {
+  const GeneratedCertificate ca =
+      generateCaCertificate("Alfie Test CA", 30, kTestBits);
 
-  auto ca = generateCaCertificate("Alfie Test CA", 30, kTestBits);
-  writePublicFile(dir / "cert.pem", ca.certificatePem);
-  writePrivateFile(dir / "key.pem", ca.privateKeyPem);
+  writePublicFile(this->path / "cert.pem", ca.certificatePem);
+  writePrivateFile(this->path / "key.pem", ca.privateKeyPem);
 
-  const auto privatePerms =
-      std::filesystem::status(dir / "key.pem").permissions();
-  assert((privatePerms & (std::filesystem::perms::group_all |
-                          std::filesystem::perms::others_all)) ==
-         std::filesystem::perms::none);
-
-  assert(readFile(dir / "cert.pem") == ca.certificatePem);
-  assert(readFile(dir / "key.pem") == ca.privateKeyPem.str());
-
-  std::filesystem::remove_all(dir);
-}
-
-int main() {
-  testCaIsSelfSignedAndMarkedAsACa();
-  testIpCertificateIsSignedByTheCaAndCarriesTheIp();
-  testEphemeralCertificateIsSelfSignedAndShortLived();
-  testFingerprintMatchesOpensslFormatAndIsUnique();
-  testPrivateFilesAreCreatedUnreadableToOthers();
-  std::cout << "C++ CA tests passed\n";
+  const std::filesystem::perms privatePerms =
+      std::filesystem::status(this->path / "key.pem").permissions();
+  CHECK((privatePerms & (std::filesystem::perms::group_all |
+                         std::filesystem::perms::others_all)) ==
+        std::filesystem::perms::none);
+  CHECK(readFile(this->path / "cert.pem") == ca.certificatePem);
+  CHECK(readFile(this->path / "key.pem") == ca.privateKeyPem.str());
 }

@@ -66,33 +66,43 @@ target_link_libraries(alfie-vault PRIVATE alfie_vault_core)
 
 include(CTest)
 
-add_executable(test_ca tests/test_ca.cpp)
-target_link_libraries(test_ca PRIVATE alfie_vault_core)
-add_test(NAME ca COMMAND test_ca)
+# Catch2 v3.16.0 as the amalgamated release distribution, vendored for the same
+# reason as the other third_party packages: the deploy box has no package
+# manager permission, and the test build should not need a network. The
+# amalgamated translation unit carries main(), so it stands in for
+# Catch2::Catch2WithMain. It is third-party code, so it is compiled without this
+# project's warning flags and included as a system header.
+add_library(catch2 STATIC third_party/catch2/catch_amalgamated.cpp)
+target_include_directories(catch2 SYSTEM PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/catch2")
+target_compile_options(catch2 PRIVATE -w)
 
-add_executable(test_vault tests/test_vault.cpp)
-target_link_libraries(test_vault PRIVATE alfie_vault_core)
-add_test(NAME vault COMMAND test_vault)
+# TEST_CASE expands __COUNTER__, which C2y standardised and clang now reports
+# under -Wpedantic. The diagnostic comes from inside a third-party macro and
+# cannot be addressed at the call site, so with -Werror it would fail the build
+# on a new enough clang. Silence just that one, only for the test binaries.
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(-Wc2y-extensions HAVE_W_C2Y_EXTENSIONS)
 
-add_executable(test_ipc_crypto tests/test_ipc_crypto.cpp)
-target_link_libraries(test_ipc_crypto PRIVATE alfie_vault_core)
-add_test(NAME ipc_crypto COMMAND test_ipc_crypto)
+# One CTest entry per binary, keeping the names the docs and `ctest -R` use.
+# Catch2 provides finer granularity inside a binary: `./build/test_vault
+# "[record]"` runs one tag, `--list-tests` shows the cases.
+function(add_catch_test NAME)
+    add_executable(test_${NAME} tests/test_${NAME}.cpp)
+    target_link_libraries(test_${NAME} PRIVATE alfie_vault_core catch2)
+    if(HAVE_W_C2Y_EXTENSIONS)
+        target_compile_options(test_${NAME} PRIVATE -Wno-c2y-extensions)
+    endif()
+    add_test(NAME ${NAME} COMMAND test_${NAME})
+endfunction()
 
-add_executable(test_ipc_transport tests/test_ipc_transport.cpp)
-target_link_libraries(test_ipc_transport PRIVATE alfie_vault_core)
-add_test(NAME ipc_transport COMMAND test_ipc_transport)
-
-add_executable(test_corruption tests/test_corruption.cpp)
-target_link_libraries(test_corruption PRIVATE alfie_vault_core)
-add_test(NAME corruption COMMAND test_corruption)
-
-add_executable(test_secure_memory tests/test_secure_memory.cpp)
-target_link_libraries(test_secure_memory PRIVATE alfie_vault_core)
-add_test(NAME secure_memory COMMAND test_secure_memory)
-
-add_executable(test_http_unlock tests/test_http_unlock.cpp)
-target_link_libraries(test_http_unlock PRIVATE alfie_vault_core)
-add_test(NAME http_unlock COMMAND test_http_unlock)
+add_catch_test(ca)
+add_catch_test(vault)
+add_catch_test(ipc_crypto)
+add_catch_test(ipc_transport)
+add_catch_test(corruption)
+add_catch_test(secure_memory)
+add_catch_test(http_unlock)
 
 add_test(NAME init_smoke COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/init_smoke.py $<TARGET_FILE:alfie-vault>)
 add_test(NAME https_smoke COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/tests/https_smoke.py $<TARGET_FILE:alfie-vault>)
@@ -145,6 +155,12 @@ if(APPLE)
             "fail to locate standard headers and report misleading findings")
     endif()
 endif()
+
+# The clang-tidy binary is frequently newer than the compiler that produced
+# compile_commands.json, so it applies diagnostics the build never saw -- with
+# -Werror recorded in that file, each one aborts the analysis of the whole
+# translation unit. __COUNTER__ in Catch2's TEST_CASE is the current example.
+list(APPEND TIDY_EXTRA_ARGS --extra-arg=-Wno-c2y-extensions)
 
 file(GLOB_RECURSE CPP_SOURCES CONFIGURE_DEPENDS src/*.cpp src/*.h tests/*.cpp)
 file(GLOB_RECURSE CPP_TRANSLATION_UNITS CONFIGURE_DEPENDS src/*.cpp tests/*.cpp)

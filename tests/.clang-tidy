@@ -1,8 +1,0 @@
-# Inherit the repository checks, then allow the one thing tests do on purpose.
-InheritParentConfig: true
-
-# Tests are plain assert-based main() binaries with no framework: an escaping
-# exception is how a test reports failure, so main() is deliberately not
-# noexcept-clean here.
-Checks: >
-  -bugprone-exception-escape

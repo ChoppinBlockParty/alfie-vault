@@ -48,12 +48,17 @@ Run a single test: `ctest --test-dir build -R vault --output-on-failure`, or inv
 directly (`./build/test_vault`). CTest names: `ca`, `vault`, `ipc_crypto`, `ipc_transport`,
 `corruption`, `secure_memory`, `http_unlock`, `init_smoke`, `https_smoke`, `gen_ip_cert`.
 
+The C++ binaries are Catch2, so each one also runs a subset on its own:
+`./build/test_vault --list-tests`, `./build/test_vault "[record]"` for one tag,
+`./build/test_corruption "Every tag bit flip is rejected"` for one case.
+
 ### Toolchain caveat
 
 This repo was developed on a Linux x86_64 box without root package-install permission, so
 dependencies are vendored under `third_party/` and hardcoded in `CMakeLists.txt` for that platform:
 
 - `third_party/argon2/usr/lib/x86_64-linux-gnu` (checked in), `third_party/libssl-dev/usr/include`
+- `third_party/catch2/` holds the Catch2 amalgamated release (checked in, platform-independent).
 - `third_party/ninja/` and `third_party/clang-tools/` are **gitignored**. Build helpers prefer
   those tools when available and otherwise look on PATH.
 
@@ -169,8 +174,12 @@ load-bearing, and the tests assert all three.
   such as `value_type` retain their required spelling. `.clang-tidy` is the authority and
   `make naming-check` enforces it. All code is in `namespace alfie`. Crypto/auth failures throw
   `alfie::CryptoError`.
-- Tests are plain `assert`-based `main()` binaries (no framework) for C++, and standalone Python
-  scripts driving the shell scripts and a real TLS server for the integration tests. `openssl` and
-  `python3` must be on PATH for those.
+- C++ tests are Catch2 v3 (`TEST_CASE`/`SECTION`, `REQUIRE`/`CHECK`, `REQUIRE_THROWS_AS`,
+  `CHECK_THAT` with matchers), vendored as the amalgamated release under `third_party/catch2/`
+  so the test build needs no network or package manager. `add_catch_test()` in `CMakeLists.txt`
+  registers one CTest entry per binary. Prefer a fixture struct with `TEST_CASE_METHOD` over
+  shared state between cases, and give each fixture its own `mkdtemp` root so a failed run
+  cannot change the next run's result. Integration tests are standalone Python scripts driving
+  the shell scripts and a real TLS server; `openssl` and `python3` must be on PATH for those.
 - `scripts/*.sh` are `set -euo pipefail` bash helpers for the local-CA/IP-certificate flow; they
   enforce `0700` dirs and `0600` private keys, which the Python tests assert.

@@ -15,6 +15,27 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+## Tests
+
+The C++ tests are [Catch2](https://github.com/catchorg/Catch2) v3, vendored as the
+amalgamated release distribution in `third_party/catch2/` (two files, checked in) so
+that building the tests needs neither a network nor a package manager. That
+translation unit carries `main()`, which is why the test binaries define none.
+
+CTest registers one entry per binary, so `ctest -R vault` still selects a whole file.
+Each binary also takes Catch2's own selectors:
+
+```bash
+./build/test_vault --list-tests             # the cases in this binary
+./build/test_vault "[record]"               # one tag
+./build/test_corruption "Appended bytes are rejected"   # one case
+./build/test_http_unlock --success          # show passing assertions too
+```
+
+To move to a newer Catch2, replace the two files from the release assets of the
+[Catch2 release page](https://github.com/catchorg/Catch2/releases) and rebuild;
+nothing else in the build refers to a version.
+
 ## Formatting/tidy
 
 ```bash

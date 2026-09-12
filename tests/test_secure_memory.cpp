@@ -7,81 +7,96 @@
 // strict mode, disabled core dumps, and wipe-on-free for secret containers.
 #include "../src/secure_memory.h"
 #include "../src/vault.h"
-#include <cassert>
-#include <iostream>
+#include <catch_amalgamated.hpp>
 #include <openssl/crypto.h>
 #include <sys/resource.h>
-#include <vector>
 
 using namespace alfie;
 
-static void testProtectionsInitialize() {
-  const auto status = initProcessMemoryProtections(MemoryPolicy::BestEffort);
-  assert(status.secureHeap && "OpenSSL secure heap should initialize");
-  assert(status.coreDumpsDisabled && "core dumps should be disabled");
-  assert(memoryProtections().secureHeap);
+/// The protections are process-wide and idempotent. Every case that touches a
+/// secret asks for them itself, so a case can be run alone by tag or by name
+/// and still get the arena it needs.
+static MemoryProtections protections() {
+  return initProcessMemoryProtections(MemoryPolicy::BestEffort);
 }
 
-static void testCoreDumpLimitIsZero() {
+TEST_CASE("Process memory protections initialize", "[memory][process]") {
+  const MemoryProtections status = protections();
+
+  CHECK(status.secureHeap);
+  CHECK(status.coreDumpsDisabled);
+  CHECK(memoryProtections().secureHeap);
+}
+
+TEST_CASE("Core dumps are disabled", "[memory][process]") {
+  protections();
+
   struct rlimit limit{};
-  assert(getrlimit(RLIMIT_CORE, &limit) == 0);
-  assert(limit.rlim_cur == 0 && "RLIMIT_CORE soft limit must be 0");
+  REQUIRE(getrlimit(RLIMIT_CORE, &limit) == 0);
+  // A core file would write the master password to disk.
+  CHECK(limit.rlim_cur == 0);
 }
 
-static void testSecretsLandInTheSecureHeap() {
-  SecureBuffer secret("master password");
-  assert(CRYPTO_secure_allocated(secret.data()) != 0 &&
-         "secret bytes should come from the OpenSSL secure arena");
+TEST_CASE("Strict mode is reported and does not degrade", "[memory][process]") {
+  const MemoryProtections status =
+      initProcessMemoryProtections(MemoryPolicy::Strict);
+
+  CHECK(status.policy == MemoryPolicy::Strict);
+  CHECK(strictMemory());
+  // Strict mode only reaches this line because both protections are in place;
+  // if either had failed, initProcessMemoryProtections would have thrown
+  // instead of degrading.
+  CHECK(status.secureHeap);
+  CHECK(status.coreDumpsDisabled);
+
+  protections(); // Leave the process as the other cases expect to find it.
 }
 
-// A plain std::vector leaves its old buffer readable after it grows;
-// SecureBytes must not.
-static void testGrowthWipesTheAbandonedBuffer() {
+TEST_CASE("Secrets are allocated from the secure heap", "[memory][arena]") {
+  protections();
+
+  const SecureBuffer secret("master password");
+
+  CHECK(CRYPTO_secure_allocated(secret.data()) != 0);
+}
+
+TEST_CASE("Growth wipes the abandoned buffer", "[memory][arena]") {
+  protections();
+
+  // A plain std::vector leaves its old buffer readable after it grows;
+  // SecureBytes must not, which is why the wipe belongs to the allocator and
+  // not to a destructor.
   SecureBytes bytes;
   bytes.reserve(8);
   const unsigned char *first = bytes.data();
   for (int i = 0; i < 8; ++i)
     bytes.push_back(0xAB);
   const size_t oldCapacity = bytes.capacity();
-  bytes.push_back(0xAB); // forces reallocation, freeing `first`
-  assert(bytes.data() != first);
+
+  bytes.push_back(0xAB); // Forces reallocation, freeing `first`.
+
+  REQUIRE(bytes.data() != first);
   // `first` is freed; the allocator must have cleansed it before release.
-  bool anyNonzero = false;
-  for (size_t i = 0; i < oldCapacity; ++i) {
-    if (first[i] != 0)
-      anyNonzero = true;
-  }
-  assert(!anyNonzero && "abandoned secret buffer was not wiped on free");
+  const std::vector<unsigned char> abandoned(first, first + oldCapacity);
+  CHECK_THAT(
+      abandoned,
+      Catch::Matchers::AllMatch(Catch::Matchers::Predicate<unsigned char>(
+          [](unsigned char byte) { return byte == 0; }, "is zero")));
 }
 
-static void testStrictModeIsReported() {
-  const auto status = initProcessMemoryProtections(MemoryPolicy::Strict);
-  assert(status.policy == MemoryPolicy::Strict);
-  assert(strictMemory());
-  // Strict mode only reaches this line because both protections are in place;
-  // if either had failed, init_process_memory_protections would have thrown
-  // instead of degrading.
-  assert(status.secureHeap && status.coreDumpsDisabled);
-  initProcessMemoryProtections(MemoryPolicy::BestEffort);
-}
+TEST_CASE("Truncate wipes the tail in place", "[memory][buffer]") {
+  protections();
 
-static void testSecureBufferTruncateWipesTail() {
   SecureBuffer buf("SECRETVALUE");
   const unsigned char *tail = buf.data() + 6;
-  buf.truncate(6);
-  assert(buf.size() == 6);
-  assert(buf.str() == "SECRET");
-  for (size_t i = 0; i < 5; ++i)
-    assert(tail[i] == 0 && "truncated tail must be wiped in place");
-}
 
-int main() {
-  testProtectionsInitialize();
-  testCoreDumpLimitIsZero();
-  testSecretsLandInTheSecureHeap();
-  testGrowthWipesTheAbandonedBuffer();
-  testStrictModeIsReported();
-  testSecureBufferTruncateWipesTail();
-  std::cout << "secure memory tests passed\n";
-  return 0;
+  buf.truncate(6);
+
+  CHECK(buf.size() == 6);
+  CHECK(buf.str() == "SECRET");
+  const std::vector<unsigned char> wiped(tail, tail + 5);
+  CHECK_THAT(
+      wiped,
+      Catch::Matchers::AllMatch(Catch::Matchers::Predicate<unsigned char>(
+          [](unsigned char byte) { return byte == 0; }, "is zero")));
 }
