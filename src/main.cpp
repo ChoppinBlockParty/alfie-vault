@@ -169,6 +169,12 @@ int main(int argc, char** argv) {
       UnlockRequestSpec spec{"init", "", "", "init_vault"};
       auto token = service.create_init_token(spec, plan);
 
+      // The setup secret goes only to the trusted terminal, never into the link or page.
+      std::cout << "  One-time setup code: ";
+      const auto& setup_code = service.setup_code(token);
+      std::cout.write(reinterpret_cast<const char*>(setup_code.data()), setup_code.size());
+      std::cout << "\n";
+
       std::cout << "\n"
                 << "==========================================================\n"
                 << "  FIRST-TIME VAULT SETUP - this runs exactly once\n"
@@ -178,6 +184,7 @@ int main(int argc, char** argv) {
                 << "That is expected: no CA exists yet. Before typing anything,\n"
                 << "check that the browser shows this exact fingerprint.\n"
                 << "\n"
+                << "  Request code: " << service.request_code(token) << "\n"
                 << "  SHA-256: " << fingerprint << "\n"
                 << "\n"
                 << "The setup page shows the same value. If they differ, you are\n"
@@ -197,7 +204,7 @@ int main(int argc, char** argv) {
       UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
       auto token = service.create_token(spec);
       std::cout << "unlock link: https://" << argv[4] << ":" << argv[5] << "/unlock/" << token
-                << "\n"
+                << "\nRequest code: " << service.request_code(token) << "\n"
                 << std::flush;
       return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
     }
@@ -208,6 +215,7 @@ int main(int argc, char** argv) {
       UnlockRequestSpec spec{argv[8], argv[9], argv[10], argv[11]};
       auto token = service.create_store_token(spec);
       std::cout << "store link: https://" << argv[4] << ":" << argv[5] << "/store/" << token << "\n"
+                << "Request code: " << service.request_code(token) << "\n"
                 << std::flush;
       return alfie::run_https_unlock_server(service, argv[4], std::stoi(argv[5]), argv[6], argv[7]);
     }

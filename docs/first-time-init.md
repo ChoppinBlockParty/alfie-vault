@@ -86,3 +86,10 @@ normal unlock sessions with the certificate pair that setup produced:
 
 The CA private key stays in the vault. Reading it back requires the master password, which means
 a human at an unlock page -- the same rule as every other secret.
+
+## One-time setup code
+
+Enter the separate six-digit setup code printed in the trusted terminal. It is never shown on
+web pages and is distinct from the public request identifier. It expires with the setup link;
+two incorrect submissions (including missing or malformed codes) invalidate that link.
+Successful setup consumes the code. Generate a new setup session if the link is invalidated.

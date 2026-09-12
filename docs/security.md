@@ -64,3 +64,19 @@ tar -czf alfie-vault-backup.tgz vault/
 ```
 
 Include `vault.meta`; records cannot be found or decrypted without the vault salt. No plaintext export command should exist.
+
+## Socket hardening
+
+- Unix IPC requires a trusted absolute path without symlinks, a UID-owned `0700` directory,
+  and a `0600` socket. Existing entries are never replaced; stale sockets require explicit cleanup.
+- `accept_secure_unix_socket` verifies the peer UID. IPC descriptors are nonblocking and
+  close-on-exec; callers manage readiness and lifetime. Browser-worker delivery remains unwired.
+- HTTPS network I/O has a 10-second deadline, 16 KiB header limit, and 1 MiB request limit.
+  Malformed or disconnected clients are isolated; request buffers are wiped on exit.
+  TLS session resumption and early data are disabled.
+- Use physical paths on macOS. Avoid concurrent fork/exec with the non-atomic CLOEXEC fallback.
+  Same-UID processes remain trusted; repeated connections can still deny service. Linux-specific
+  branches need deployment testing.
+
+References: [Unix socket permissions and credentials](https://www.man7.org/linux/man-pages/man7/unix.7.html),
+[OpenSSL nonblocking TLS](https://docs.openssl.org/3.5/man7/ossl-guide-tls-client-non-block/).

@@ -75,9 +75,12 @@ class UnlockService {
 
   std::string create_token(const UnlockRequestSpec& spec);
   std::string create_store_token(const UnlockRequestSpec& spec);
-  // First-time install link. The token itself is the authorization: there are no vault
-  // credentials to check yet, because this is what creates them.
+  // Initialization requires both the link token and a separate terminal-only code.
   std::string create_init_token(const UnlockRequestSpec& spec, InitPlan plan);
+  // Public visual identifier for matching a live request to the bot message.
+  std::string request_code(const std::string& token) const;
+  // Trusted terminal output only; never include this code in an HTTP response.
+  const SecureBuffer& setup_code(const std::string& token) const;
   HttpResponse handle(const HttpRequest& request);
   const std::optional<DeliveredSecret>& last_delivery() const {
     return last_delivery_;
@@ -103,6 +106,9 @@ class UnlockService {
     bool used = false;
     UnlockMode mode = UnlockMode::Unlock;
     InitPlan plan;
+    std::string display_code;
+    SecureBuffer setup_code;
+    unsigned int setup_failures = 0;
   };
 
   std::string create_token_for(const UnlockRequestSpec& spec, UnlockMode mode, InitPlan plan = {});

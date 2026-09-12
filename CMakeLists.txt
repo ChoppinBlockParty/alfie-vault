@@ -34,6 +34,9 @@ else()
     get_filename_component(ARGON2_LIB_DIR "${ARGON2_LIB}" DIRECTORY)
 endif()
 
+# Thread-local SIGPIPE handling uses the platform pthread API.
+find_package(Threads REQUIRED)
+
 add_library(alfie_vault_core
     src/secure_memory.cpp
     src/ca.cpp
@@ -50,7 +53,7 @@ target_include_directories(alfie_vault_core PUBLIC
     ${ARGON2_HEADERS}
 )
 
-target_link_libraries(alfie_vault_core PUBLIC ${ARGON2_LIB} ${SSL_LIB} ${CRYPTO_LIB})
+target_link_libraries(alfie_vault_core PUBLIC ${ARGON2_LIB} ${SSL_LIB} ${CRYPTO_LIB} Threads::Threads)
 set_target_properties(alfie_vault_core PROPERTIES
     BUILD_RPATH "${ARGON2_LIB_DIR}"
 )

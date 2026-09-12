@@ -30,12 +30,18 @@ def main() -> int:
         banner = ""
         url = None
         fingerprint = None
+        check_code = None
+        setup_code = None
         try:
             for _ in range(40):
                 line = server.stdout.readline()
                 if not line:
                     break
                 banner += line
+                if line.startswith("  One-time setup code: "):
+                    setup_code = line.split("One-time setup code: ", 1)[1].strip()
+                if line.startswith("  Request code: "):
+                    check_code = line.split("Request code: ", 1)[1].strip()
                 if line.startswith("  SHA-256: "):
                     fingerprint = line.split("SHA-256: ", 1)[1].strip()
                 match = re.match(r"setup link: (https://127\.0\.0\.1:%s/init/[0-9a-f]+)$" % port,
@@ -45,6 +51,8 @@ def main() -> int:
                     break
             assert url, banner
             assert fingerprint, banner
+            assert re.fullmatch(r"[0-9]{6}", setup_code or ""), "missing setup code"
+            assert re.fullmatch(r"[0-9]{6}", check_code or ""), banner
             assert "FIRST-TIME VAULT SETUP" in banner, banner
 
             ctx = ssl._create_unverified_context()
@@ -53,10 +61,13 @@ def main() -> int:
             assert "#450a0a" in page
             assert "FIRST-TIME VAULT SETUP" in page
             assert "exactly once" in page
+            assert setup_code not in page, "setup secret must not be served"
+            assert check_code in page, "page must echo the six-digit code"
             assert fingerprint in page, "page must echo the terminal fingerprint"
 
             data = urllib.parse.urlencode(
-                {"login": "yuki", "password": "Correct-Horse-9", "confirm": "Correct-Horse-9"}
+                {"login": "yuki", "password": "Correct-Horse-9", "confirm": "Correct-Horse-9",
+                 "setup_code": setup_code}
             ).encode()
             body = urllib.request.urlopen(
                 urllib.request.Request(url, data=data, method="POST"), context=ctx, timeout=30
@@ -73,6 +84,16 @@ def main() -> int:
         # The setup server exits on its own once the vault exists.
         assert server.returncode is not None
 
+        # Fixture password must never reach generated files or process output.
+        remaining_stdout, stderr = server.communicate()
+        assert "Correct-Horse-9" not in banner + remaining_stdout + stderr
+        for path in pathlib.Path(tmp).rglob("*"):
+            if path.is_file():
+                assert b"Correct-Horse-9" not in path.read_bytes(), "password persisted to disk"
+        records = list((vault / "records").rglob("*.enc"))
+        assert len(records) == 1
+        assert records[0].read_bytes().startswith(b"ALFIECHUNK2\n")
+        assert b"PRIVATE KEY" not in records[0].read_bytes()
         assert (vault / "vault.meta").exists()
         ca_cert = out / "alfie-local-ca-cert.pem"
         assert ca_cert.exists()
