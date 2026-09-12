@@ -4,6 +4,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -45,9 +46,11 @@ SecureBuffer hkdf_sha256(const std::vector<unsigned char>& shared_secret,
   std::vector<unsigned char> expand_input = info;
   expand_input.push_back(1);
   auto okm = hmac_sha256(prk, expand_input);
-  okm.resize(kIpcKeyLen);
   OPENSSL_cleanse(prk.data(), prk.size());
-  return SecureBuffer(std::move(okm));
+  SecureBuffer key(kIpcKeyLen);
+  std::copy_n(okm.data(), kIpcKeyLen, key.data());
+  OPENSSL_cleanse(okm.data(), okm.size());
+  return key;
 }
 
 std::vector<unsigned char> encrypt_gcm(const SecureBuffer& key,
@@ -59,12 +62,11 @@ std::vector<unsigned char> encrypt_gcm(const SecureBuffer& key,
     throw CryptoError("EVP_CIPHER_CTX_new failed");
   std::vector<unsigned char> out(plaintext.size() + kTagLen);
   int len = 0;
-  bool ok =
-      EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
-      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce.size(), nullptr) == 1 &&
-      EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.bytes().data(), nonce.data()) == 1 &&
-      EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(), aad.size()) == 1 &&
-      EVP_EncryptUpdate(ctx, out.data(), &len, plaintext.bytes().data(), plaintext.size()) == 1;
+  bool ok = EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
+            EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce.size(), nullptr) == 1 &&
+            EVP_EncryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce.data()) == 1 &&
+            EVP_EncryptUpdate(ctx, nullptr, &len, aad.data(), aad.size()) == 1 &&
+            EVP_EncryptUpdate(ctx, out.data(), &len, plaintext.data(), plaintext.size()) == 1;
   int total = len;
   ok = ok && EVP_EncryptFinal_ex(ctx, out.data() + total, &len) == 1;
   ok = ok &&
@@ -84,11 +86,11 @@ SecureBuffer decrypt_gcm(const SecureBuffer& key, const std::vector<unsigned cha
   EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
   if (!ctx)
     throw CryptoError("EVP_CIPHER_CTX_new failed");
-  std::vector<unsigned char> plain(ct_len);
+  SecureBuffer plain(ct_len);
   int len = 0;
   bool ok = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), nullptr, nullptr, nullptr) == 1 &&
             EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, nonce.size(), nullptr) == 1 &&
-            EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.bytes().data(), nonce.data()) == 1 &&
+            EVP_DecryptInit_ex(ctx, nullptr, nullptr, key.data(), nonce.data()) == 1 &&
             EVP_DecryptUpdate(ctx, nullptr, &len, aad.data(), aad.size()) == 1 &&
             EVP_DecryptUpdate(ctx, plain.data(), &len, ciphertext_and_tag.data(), ct_len) == 1;
   int total = len;
@@ -100,13 +102,19 @@ SecureBuffer decrypt_gcm(const SecureBuffer& key, const std::vector<unsigned cha
   EVP_CIPHER_CTX_free(ctx);
   if (!ok)
     throw CryptoError("IPC AES-256-GCM decrypt failed");
-  plain.resize(total);
-  return SecureBuffer(std::move(plain));
+  plain.truncate(static_cast<size_t>(total));
+  return plain;
 }
 }  // namespace
 
 std::vector<unsigned char> IpcRequestContext::aad() const {
-  std::string packed = "alfie-ipc-v1\0" + token + "\0" + domain + "\0" + action;
+  // Real NUL separators: `"lit\0" + token` would decay to a C string and drop them, letting
+  // different (token, domain, action) triples produce the same AAD.
+  std::string packed = "alfie-ipc-v1";
+  for (const auto* field : {&token, &domain, &action}) {
+    packed.push_back('\0');
+    packed += *field;
+  }
   return {packed.begin(), packed.end()};
 }
 
@@ -126,14 +134,14 @@ IpcKeyPair generate_ipc_keypair() {
     throw CryptoError("X25519 keygen failed");
 
   std::vector<unsigned char> pub(kX25519KeyLen);
-  std::vector<unsigned char> priv(kX25519KeyLen);
+  SecureBuffer priv(kX25519KeyLen);
   size_t pub_len = pub.size(), priv_len = priv.size();
   ok = EVP_PKEY_get_raw_public_key(pkey, pub.data(), &pub_len) == 1 &&
        EVP_PKEY_get_raw_private_key(pkey, priv.data(), &priv_len) == 1;
   EVP_PKEY_free(pkey);
   if (!ok || pub_len != kX25519KeyLen || priv_len != kX25519KeyLen)
     throw CryptoError("X25519 raw key export failed");
-  return {SecureBuffer(std::move(priv)), std::move(pub)};
+  return {std::move(priv), std::move(pub)};
 }
 
 SecureBuffer derive_ipc_session_key(const SecureBuffer& private_key,
@@ -142,8 +150,8 @@ SecureBuffer derive_ipc_session_key(const SecureBuffer& private_key,
   if (private_key.size() != kX25519KeyLen || peer_public_key.size() != kX25519KeyLen) {
     throw CryptoError("bad X25519 key size");
   }
-  EVP_PKEY* priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr,
-                                                private_key.bytes().data(), private_key.size());
+  EVP_PKEY* priv = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, private_key.data(),
+                                                private_key.size());
   EVP_PKEY* peer = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, peer_public_key.data(),
                                                peer_public_key.size());
   if (!priv || !peer)

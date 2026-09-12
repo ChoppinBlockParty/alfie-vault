@@ -45,7 +45,8 @@ ctest --test-dir build --output-on-failure
 
 Run a single test: `ctest --test-dir build -R vault --output-on-failure`, or invoke the binary
 directly (`./build/test_vault`). CTest names: `vault`, `ipc_crypto`, `ipc_transport`,
-`http_unlock`, `https_smoke`, `gen_ip_cert`, `gen_local_ca`, `gen_ca_ip_server_cert`.
+`corruption`, `secure_memory`, `http_unlock`, `https_smoke`, `gen_ip_cert`, `gen_local_ca`,
+`gen_ca_ip_server_cert`.
 
 ### Toolchain caveat
 
@@ -61,20 +62,38 @@ On a different platform (e.g. macOS/arm64) the vendored paths do not apply; expe
 
 ## Architecture
 
-`src/` builds one static lib (`alfie_vault_core`) plus a thin CLI (`src/main.cpp`). Four layers:
+`src/` builds one static lib (`alfie_vault_core`) plus a thin CLI (`src/main.cpp`). Five layers:
+
+**0. `secure_memory.{hpp,cpp}` — process memory protections.** The OpenSSL secure heap,
+`RLIMIT_CORE`, the strict/best-effort policy, and `SecureAllocator`. Call
+`init_process_memory_protections()` before reading any secret.
 
 **1. `vault.{hpp,cpp}` — the chunk vault.** A vault is a *directory of independently encrypted
-records*, never one decrypted blob. `vault.meta` (`ALFIEVAULT1` + random 32-byte salt + Argon2id
-cost params) is created on first write; Argon2id (m=64 MiB, t=3, p=1) over that salt derives a
+records*, never one decrypted blob. `vault.meta` (`ALFIEVAULT2` + random 32-byte salt + Argon2id
+cost params + two HMAC credential verifiers) is created on first write; Argon2id (m=64 MiB, t=3, p=1) over that salt derives a
 64-byte secret split into an **index key** and a **record key**. The record path is
 `records/<id[0:2]>/<id[2:4]>/<id>.enc` where `id = HMAC-SHA256(index_key, purpose \0
-normalize_domain(domain) \0 account)` — so domains and usernames never appear in filenames. Record
-file layout is `ALFIECHUNK1\n` magic (also used as GCM AAD) + 16-byte salt (reserved, unused today)
-+ 12-byte nonce + AES-256-GCM ciphertext/tag.
+normalize_domain(domain) \0 account)` with real NUL separators — so domains and usernames never
+appear in filenames. Record file layout is `ALFIECHUNK2\n` magic + 16-byte salt (reserved) +
+12-byte nonce + AES-256-GCM ciphertext/tag, with **magic + record id + salt** as GCM AAD. Binding
+the id is what stops record files being swapped between accounts by anyone with write access to
+the vault directory. `ALFIECHUNK1` records (magic-only AAD, separator-less ids) stay readable and
+upgrade on the next write.
 
-`SecureBuffer` is the memory discipline: move-only, best-effort `mlock` + `MADV_DONTDUMP`, wiped
-with `OPENSSL_cleanse` in the destructor. `VaultKeys` is move-only for the same reason, and
-`derive_keys` wipes the passphrase buffer as soon as Argon2id returns.
+The Argon2id cost is read back from `vault.meta` on every unlock rather than hardcoded, so it can
+be raised for new vaults without orphaning existing ones.
+
+`SecureBuffer` is the memory discipline: move-only, and backed by `SecureBytes` — a vector over
+`SecureAllocator`, which serves from the OpenSSL secure heap (one arena, locked as a unit) and
+wipes on free. The wipe belongs to the allocator, not a destructor, so a container that grows
+cannot leave a readable copy in the abandoned block. `secure_memory.hpp` also owns the
+process-level protections: secure-heap init, `RLIMIT_CORE` 0, and `MemoryPolicy::Strict`
+(`ALFIE_VAULT_STRICT_MEMORY=1`), which fails closed instead of degrading. `VaultKeys` is move-only
+for the same reason, and `derive_keys` wipes the passphrase buffer as soon as Argon2id returns.
+
+`VaultSession` is the production entry point: it runs Argon2id **once**, wipes the passphrase,
+verifies login + master password against the stored verifiers, and holds the derived keys only
+for that one request. Prefer it over `ChunkVault`, which cannot check a login.
 
 **2. `ipc_crypto.{hpp,cpp}` — the encrypted envelope.** Ephemeral X25519 → HKDF-SHA256 session key;
 `IpcRequestContext{token, domain, action}` is bound as HKDF info and GCM AAD, so a frame is only
@@ -96,19 +115,23 @@ IPC layer above is the intended next step.
 
 ## Conventions and constraints
 
-- **Never widen the plaintext window.** Prefer `ChunkVault::use(...)` (callback receives a
-  `SecureBuffer`, wiped on return) over `get()`, which returns a long-lived `std::string`. Nothing
-  should log, echo, or return a secret value; the unlock pages report success only.
-- **Keep the unlock human-gated.** Plain-HTTP mode (`serve-unlock`/`serve-store`) is
-  localhost-development only; a remote box must use the TLS variants, which on an IP-only host means
-  the local-CA flow in `docs/local-ca.md`. Tokens are single-use and TTL-bound (`UnlockRequestSpec`
+- **Never widen the plaintext window.** Prefer `VaultSession::use(...)` / `ChunkVault::use(...)`
+  (callback receives a `SecureBuffer`, wiped on return) over `get()`, which returns a long-lived
+  `std::string`. The `std::string` passphrase/plaintext overloads in `vault.hpp` are marked
+  test-fixture-only; production paths take `SecureBuffer`. Nothing should log, echo, or return a
+  secret value; the unlock pages report success only.
+- **Keep the unlock human-gated.** There is no plaintext-HTTP server in this build: the unlock
+  page carries a master password, so every `serve-*` subcommand is TLS-only. On an IP-only host
+  that means the local-CA flow in `docs/local-ca.md`. Tokens are single-use and TTL-bound (`UnlockRequestSpec`
   defaults to 300s) — treat both as load-bearing.
-- **No production secrets through argv.** The `put-account`/`get-account` CLI subcommands take a
-  passphrase as an argument and exist for smoke tests only — argv is visible OS-wide. New
-  functionality belongs on the HTTPS/stdin/socket path.
-- `docs/best-practices.md` holds the standards-backed rationale plus a live "must improve next"
-  list (SecureBuffer-first APIs, OpenSSL secure heap, fail-closed mlock, `RLIMIT_CORE`, corruption
-  fuzz tests); consult it before changing crypto or memory handling.
+- **No production secrets through argv.** All CLI subcommands read secrets from stdin (first line
+  = master password, echo off on a TTY); argv is visible OS-wide. `get-account` prints a
+  decrypted record and is gated behind `ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1` — a test fixture,
+  not a delivery path. New functionality belongs on the HTTPS/stdin/socket path.
+- `docs/best-practices.md` holds the standards-backed rationale, what each rule bought, and a live
+  "must improve next" list (IPC delivery wiring, re-storing V1 records, probing that the secure
+  arena is really resident, `ReplayGuard` growth, unlock rate-limiting); consult it before changing
+  crypto or memory handling.
 - Style is Google C++ via `.clang-format` (100 cols, left pointers) with project naming:
   `lower_case` functions/variables, `CamelCase` types, trailing `_` on private members. All code is
   in `namespace alfie`. Crypto/auth failures throw `alfie::CryptoError`.

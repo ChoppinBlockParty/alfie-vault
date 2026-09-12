@@ -4,14 +4,41 @@
 
 The vault does not decrypt all data at once. A lookup decrypts only one encrypted record. This reduces damage from accidental memory exposure.
 
+## Record format
+
+Records are `ALFIECHUNK2`: `magic + 16-byte salt + 12-byte nonce + AES-256-GCM ciphertext/tag`,
+with **magic + record id + salt** bound in as GCM AAD. Binding the id is what stops a record file
+being moved to another record's path -- an attacker with write access to the vault directory, but
+no master password, could otherwise make an unlock hand a task the wrong credential.
+
+`ALFIECHUNK1` records predate that binding and authenticated only the magic. They are still
+readable, and a rewrite upgrades them in place (the stale V1 file is removed). Until they are
+rewritten they remain swappable, so re-store anything written before this change.
+
+Record ids also changed: the field separator in `HMAC(index_key, purpose \0 domain \0 account)`
+was being dropped, because `a + "\0" + b` decays to a C string and `strlen` stops at the NUL.
+Ids are now genuinely NUL-separated, and lookups fall back to the old id so existing vaults keep
+resolving.
+
+## Memory protections
+
+`init_process_memory_protections()` runs before any secret is read. It initializes the OpenSSL
+secure heap -- one arena, locked as a unit, that serves every secret allocation -- and sets
+`RLIMIT_CORE` to 0. `ALFIE_VAULT_STRICT_MEMORY=1` makes both mandatory: the process refuses to
+start rather than hold a master password it cannot protect. The default is best-effort.
+
 ## What is still not solved
 
 - If the host is fully compromised while Alfie is using a credential, that credential can be read at the moment of use.
-- Passphrases must not be passed as CLI arguments in production. The current CLI is for tests/smoke only.
+- Secrets are read from stdin, never argv. `get-account` still prints a decrypted record to
+  stdout and requires `ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1`; it is a test fixture, not a
+  delivery path.
 - Password derivation uses Argon2id, not scrypt/PBKDF2.
 - Each vault has a random 32-byte salt in `vault.meta`; this salt is not secret, but it makes key derivation unique per vault.
 - Decrypted records should be consumed through `ChunkVault::use(...)`; this keeps plaintext inside a callback-owned `SecureBuffer` and avoids returning a long-lived plaintext `std::string`.
-- `SecureBuffer`, `VaultKeys`, and passphrase buffers are move-only and wiped with `OPENSSL_cleanse` before release.
+- `SecureBuffer`, `VaultKeys`, and passphrase buffers are move-only. Their storage is wiped by
+  the allocator on free, so a container that grows does not leave a readable copy behind.
+- Failed unlock attempts are neither rate-limited nor audit-logged within a token's TTL window.
 - The production path must use a short-lived HTTPS unlock server and stdin/socket memory buffers.
 
 ## Export

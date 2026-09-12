@@ -38,6 +38,14 @@ def main() -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Secrets go in on stdin; argv is visible process-wide.
+        subprocess.run(
+            [str(binary), "init-vault", str(vault), "yuki"],
+            cwd=repo,
+            check=True,
+            input=b"test-pass\n",
+            stdout=subprocess.DEVNULL,
+        )
         subprocess.run(
             [
                 str(binary),
@@ -45,11 +53,10 @@ def main() -> int:
                 str(vault),
                 "example.com",
                 "yuki@example.com",
-                "test-pass",
-                "[REDACTED]",
             ],
             cwd=repo,
             check=True,
+            input=b'test-pass\n{"secret":"[REDACTED]"}\n',
             stdout=subprocess.DEVNULL,
         )
         server = subprocess.Popen(

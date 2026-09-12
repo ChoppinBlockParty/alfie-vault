@@ -1,6 +1,7 @@
-# HTTP unlock server
+# HTTPS unlock server
 
-This is the first simple web unlock layer.
+The web unlock layer. It is HTTPS-only by design: the page carries the vault master password, so
+there is no plaintext-HTTP server in this build.
 
 ## What it does
 
@@ -8,7 +9,7 @@ This is the first simple web unlock layer.
 2. The server prints a link like:
 
 ```text
-http://127.0.0.1:18080/unlock/<token>
+https://127.0.0.1:18443/unlock/<token>
 ```
 
 3. Yuki opens the link and enters:
@@ -25,7 +26,7 @@ http://127.0.0.1:18080/unlock/<token>
 For secrets that should not go through Telegram, Alfie creates a one-time store link:
 
 ```bash
-./alfie-vault serve-store ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com store_secret
+./alfie-vault serve-store-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com store_secret
 ```
 
 The page asks for:
@@ -39,21 +40,13 @@ After submit, the server encrypts the value into the vault chunk and returns onl
 ## Current command
 
 ```bash
-./alfie-vault serve-unlock ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com fill_password
-```
-
-TLS variants:
-
-```bash
 ./build/alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com fill_password
-./build/alfie-vault serve-store-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com store_secret
 ```
 
 ## Current limitation
 
-Plain HTTP mode is local-development only. Do not expose it outside localhost.
-
-TLS server mode is implemented with OpenSSL and requires a PEM certificate and private key. Production should use a real certificate, e.g. via Caddy/nginx reverse proxy or Let's Encrypt.
+TLS server mode is implemented with OpenSSL (TLS 1.3 minimum) and requires a PEM certificate and
+private key. Production should use a real certificate, e.g. via Caddy/nginx reverse proxy or Let's Encrypt.
 
 If there is no DNS name, generate a local CA and an IP-address server certificate signed by that CA:
 

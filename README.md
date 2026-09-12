@@ -79,10 +79,11 @@ See `docs/encrypted-ipc.md`.
 
 ## HTTP unlock server
 
-Simple local HTTP unlock server is implemented:
+The unlock server is HTTPS-only; there is no plaintext-HTTP server in this build, because the
+page carries the vault master password.
 
 ```bash
-./alfie-vault serve-unlock ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com fill_password
+./alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com fill_password
 ```
 
 It creates a one-time `/unlock/<token>` page. The page accepts login + vault password, unlocks one chunk, never displays the final secret, then consumes the token.
@@ -90,17 +91,10 @@ It creates a one-time `/unlock/<token>` page. The page accepts login + vault pas
 It can also create a one-time `/store/<token>` page for adding new secrets without Telegram:
 
 ```bash
-./alfie-vault serve-store ./vault yuki 127.0.0.1 18080 account example.com yuki@example.com store_secret
+./alfie-vault serve-store-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com store_secret
 ```
 
 The store page accepts login + vault password + secret JSON, encrypts the new chunk, and never echoes the secret.
-
-TLS variants are also implemented:
-
-```bash
-./build/alfie-vault serve-unlock-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com fill_password
-./build/alfie-vault serve-store-tls ./vault yuki 127.0.0.1 18443 cert.pem key.pem account example.com yuki@example.com store_secret
-```
 
 Without DNS, generate an IP-address certificate:
 
@@ -121,8 +115,15 @@ Use CMake with Ninja as the main build system. C++ formatting/tidying is configu
 ## Current CLI
 
 ```bash
-./alfie-vault put-account ./vault example.com yuki@example.com passphrase '{"login":"yuki@example.com","secret":"..."}'
-./alfie-vault get-account ./vault example.com yuki@example.com passphrase
+# Secrets go in on stdin -- argv is visible process-wide. First line is the master password;
+# for put-account the rest of stdin is the record payload.
+printf 'master-pass\n{"login":"yuki@example.com","secret":"..."}\n' \
+  | ./alfie-vault put-account ./vault example.com yuki@example.com
+
+# get-account prints a decrypted record, so it is gated behind an explicit opt-in and exists
+# for test fixtures only. The real read path is serve-unlock-tls.
+printf 'master-pass\n' \
+  | ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1 ./alfie-vault get-account ./vault example.com yuki@example.com
 ```
 
 Next step: wire successful unlocks into encrypted Unix-socket browser-worker delivery. The CLI is smoke-test only because argv is visible to the OS.

@@ -17,21 +17,74 @@
 
 Already good:
 
-- Argon2id is used with stronger-than-OWASP-minimum settings: 64 MiB, 3 iterations, p=1.
+- Argon2id with stronger-than-OWASP-minimum settings: 64 MiB, 3 iterations, p=1 -- and the cost
+  is read back from `vault.meta` on every unlock, so it can be raised for new vaults without
+  making existing ones underivable (rules 6, 7).
 - AES-256-GCM protects each record independently.
 - HMAC-SHA256 record IDs avoid plaintext domains/usernames in filenames.
-- `SecureBuffer` is move-only and wipes with `OPENSSL_cleanse`.
-- `mlock` and `MADV_DONTDUMP` are attempted for secret buffers.
-- `ChunkVault::use(...)` keeps decrypted records in callback-scoped `SecureBuffer`.
+- Secret containers allocate from the OpenSSL secure heap, are locked out of swap, excluded from
+  core dumps, and wiped on free -- including the buffer abandoned when a container grows
+  (rules 1-4).
+- Core dumps are disabled process-wide with `setrlimit(RLIMIT_CORE, 0)`.
+- `ChunkVault::use(...)` / `VaultSession::use(...)` keep decrypted records in a callback-scoped
+  `SecureBuffer`.
+- Secrets reach the CLI on stdin, never argv (rule 9).
+- Record corruption, truncation, tag tampering and record-swapping are covered by tests.
 
-Must improve next:
+Resolved from the previous "must improve next" list:
 
-1. Replace `std::string` passphrase and plaintext APIs with `SecureBuffer`-first APIs.
-2. Initialize OpenSSL secure heap at process start and use secure allocations where practical.
-3. Add runtime checks that fail closed if memory locking/secure heap fails in strict mode.
-4. Disable core dumps for the process with `setrlimit(RLIMIT_CORE, 0)`.
-5. Remove production CLI secret arguments; keep CLI only for test fixtures.
-6. Add a fuzz/corruption test for encrypted chunks and authentication tag failures.
+1. **SecureBuffer-first APIs.** `SecureBuffer` is now the parameter and return type for every
+   passphrase and plaintext on a production path. `SecureBuffer` holds `SecureBytes` -- a vector
+   over `SecureAllocator`, so its storage is locked and wiped by the allocator itself rather than
+   by a destructor that a reallocation can outrun. The `std::string` overloads survive only as
+   test fixtures and are marked as such in `vault.hpp`.
+2. **OpenSSL secure heap.** `init_process_memory_protections()` calls
+   `CRYPTO_secure_malloc_init()` at process start and every secret allocation is served from
+   that arena. This also removes a hazard in the old per-buffer `mlock`: locks are page-granular,
+   so two secrets sharing a page shared a lock and freeing one would unlock the other. The arena
+   is locked once, as a unit. The per-buffer path remains only as a fallback.
+3. **Fail closed.** `MemoryPolicy::Strict` (`ALFIE_VAULT_STRICT_MEMORY=1`) throws rather than
+   continuing when the secure heap is unavailable, core dumps cannot be disabled, or a fallback
+   allocation cannot be locked. The default stays best-effort so a developer box still runs.
+4. **`RLIMIT_CORE`.** Set to 0 during the same init, and asserted by `tests/test_secure_memory.cpp`.
+5. **No secrets in argv.** `init-vault` and `put-account` read the master password from the first
+   line of stdin (echo off on a TTY) and the payload from the rest. `get-account` decrypts to
+   stdout and now refuses to run without `ALFIE_VAULT_ALLOW_PLAINTEXT_STDOUT=1`.
+6. **Corruption/fuzz tests.** `tests/test_corruption.cpp` flips every byte of a record, every bit
+   of the GCM tag, truncates at every length, appends, feeds garbage, swaps record files between
+   accounts, and runs a seeded random-mutation sweep. The invariant is absolute: an altered
+   record must never decrypt, and must never yield another record's contents.
+
+Found while validating the rules above, and fixed:
+
+- **Record IDs were not domain-separated.** `purpose + "\0" + domain + "\0" + account` looks like
+  it inserts NUL separators but does not: the literal decays to a C string and `strlen` stops at
+  the NUL, so the fields were concatenated bare. `("acc", "ountX")` and `("account", "X")` hashed
+  to the same record, silently overwriting each other. The same bug was in the IPC AAD, where it
+  weakened the binding between a frame and its `(token, domain, action)`.
+- **Records were not bound to their own identity.** V1 authenticated only the 12-byte magic, so
+  the reserved salt field was malleable and, worse, record files could be swapped between
+  accounts: anyone able to write to the vault directory -- without knowing the master password --
+  could make an unlock hand a task the wrong credential. The `ALFIECHUNK2` format binds
+  magic + record id + salt into the GCM AAD. V1 records stay readable and upgrade to V2 on the
+  next write; see `docs/security.md` for the migration note.
+- **A wrong master password reported "record not found".** The stored verifiers exist precisely
+  to tell those two cases apart, but only the HTTPS path consulted them. `VaultSession` now
+  checks the password verifier on every open.
+
+## Must improve next
+
+1. Wire `UnlockService::handle_submit` to the encrypted IPC layer. It still records only
+   delivery metadata, so the browser-worker handoff is unimplemented.
+2. Re-store records written before the `ALFIECHUNK2` change. They remain readable, but until
+   they are rewritten they carry the V1 AAD and are still swappable.
+3. Verify that the secure arena is actually resident: `CRYPTO_secure_malloc_init` reports
+   success even where its internal `mlock` was refused, so `secure_heap == true` is weaker than
+   "locked". Strict mode should probe this rather than trust the flag.
+4. The IPC `ReplayGuard` keeps every `(token, nonce)` pair it has ever seen in memory, with no
+   eviction -- an unbounded growth path in a long-running server.
+5. Rate-limit and audit-log failed unlock attempts. A token is single-use and TTL-bound, but
+   within its window a wrong password can be retried without limit or trace.
 
 ## Sources
 

@@ -9,16 +9,33 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 
-set(OPENSSL_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libssl-dev/usr/include")
-set(OPENSSL_ARCH_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libssl-dev/usr/include/x86_64-linux-gnu")
-set(ARGON2_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/usr/include")
-set(ARGON2_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/usr/lib/x86_64-linux-gnu")
+# Dependencies: prefer the vendored third_party/ packages used on the Linux deploy box
+# (no root apt permission there); fall back to system OpenSSL/Argon2 elsewhere.
+set(VENDORED_ARGON2_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/usr/lib/x86_64-linux-gnu")
 
-find_library(CRYPTO_LIB NAMES crypto libcrypto.so.3 REQUIRED)
-find_library(SSL_LIB NAMES ssl libssl.so.3 REQUIRED)
-find_library(ARGON2_LIB NAMES argon2 PATHS "${ARGON2_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "${VENDORED_ARGON2_LIB_DIR}")
+    set(OPENSSL_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libssl-dev/usr/include")
+    set(OPENSSL_ARCH_HEADERS "${OPENSSL_HEADERS}/x86_64-linux-gnu")
+    set(ARGON2_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/argon2/usr/include")
+    set(ARGON2_LIB_DIR "${VENDORED_ARGON2_LIB_DIR}")
+
+    find_library(CRYPTO_LIB NAMES crypto libcrypto.so.3 REQUIRED)
+    find_library(SSL_LIB NAMES ssl libssl.so.3 REQUIRED)
+    find_library(ARGON2_LIB NAMES argon2 PATHS "${ARGON2_LIB_DIR}" NO_DEFAULT_PATH REQUIRED)
+else()
+    find_package(OpenSSL 3 REQUIRED)
+    get_target_property(OPENSSL_HEADERS OpenSSL::Crypto INTERFACE_INCLUDE_DIRECTORIES)
+    set(OPENSSL_ARCH_HEADERS "${OPENSSL_HEADERS}")
+    set(CRYPTO_LIB OpenSSL::Crypto)
+    set(SSL_LIB OpenSSL::SSL)
+
+    find_path(ARGON2_HEADERS argon2.h REQUIRED)
+    find_library(ARGON2_LIB NAMES argon2 REQUIRED)
+    get_filename_component(ARGON2_LIB_DIR "${ARGON2_LIB}" DIRECTORY)
+endif()
 
 add_library(alfie_vault_core
+    src/secure_memory.cpp
     src/vault.cpp
     src/http_unlock.cpp
     src/ipc_crypto.cpp
@@ -53,6 +70,14 @@ add_test(NAME ipc_crypto COMMAND test_ipc_crypto)
 add_executable(test_ipc_transport tests/test_ipc_transport.cpp)
 target_link_libraries(test_ipc_transport PRIVATE alfie_vault_core)
 add_test(NAME ipc_transport COMMAND test_ipc_transport)
+
+add_executable(test_corruption tests/test_corruption.cpp)
+target_link_libraries(test_corruption PRIVATE alfie_vault_core)
+add_test(NAME corruption COMMAND test_corruption)
+
+add_executable(test_secure_memory tests/test_secure_memory.cpp)
+target_link_libraries(test_secure_memory PRIVATE alfie_vault_core)
+add_test(NAME secure_memory COMMAND test_secure_memory)
 
 add_executable(test_http_unlock tests/test_http_unlock.cpp)
 target_link_libraries(test_http_unlock PRIVATE alfie_vault_core)

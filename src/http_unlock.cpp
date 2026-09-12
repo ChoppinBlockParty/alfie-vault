@@ -1,6 +1,7 @@
 #include "http_unlock.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <openssl/crypto.h>
 #include <openssl/rand.h>
@@ -20,6 +21,22 @@
 
 namespace alfie {
 namespace {
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC 0
+#endif
+
+// accept4(2) is Linux-only; elsewhere fall back to accept(2) + FD_CLOEXEC.
+int accept_cloexec(int listen_fd) {
+#ifdef __linux__
+  return accept4(listen_fd, nullptr, nullptr, SOCK_CLOEXEC);
+#else
+  int fd = accept(listen_fd, nullptr, nullptr);
+  if (fd >= 0)
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+  return fd;
+#endif
+}
+
 std::runtime_error sys_error(const std::string& what) {
   return std::runtime_error(what + ": " + std::strerror(errno));
 }
@@ -159,18 +176,6 @@ bool http_message_complete(const std::string& raw) {
   return raw.size() >= header_end + 4 + content_length_from_raw(raw);
 }
 
-std::string read_http_plain(int fd) {
-  std::string raw;
-  char buf[8192];
-  while (!http_message_complete(raw)) {
-    ssize_t n = read(fd, buf, sizeof(buf));
-    if (n <= 0)
-      break;
-    raw.append(buf, buf + n);
-  }
-  return raw;
-}
-
 std::string read_http_tls(SSL* ssl) {
   std::string raw;
   char buf[8192];
@@ -183,12 +188,23 @@ std::string read_http_tls(SSL* ssl) {
   return raw;
 }
 
-std::string read_file_secret(const std::filesystem::path& path) {
-  std::ifstream in(path, std::ios::binary);
+SecureBuffer read_file_secret(const std::filesystem::path& path) {
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
   if (!in) {
     throw CryptoError("source secret file not found");
   }
-  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  const auto size = in.tellg();
+  if (size < 0)
+    throw CryptoError("cannot size source secret file");
+  in.seekg(0);
+  // Sized up front so the contents are read straight into secure memory, never staged in a
+  // growing std::string on the normal heap.
+  SecureBuffer secret(static_cast<size_t>(size));
+  if (size > 0)
+    in.read(reinterpret_cast<char*>(secret.data()), size);
+  if (!in)
+    throw CryptoError("cannot read source secret file");
+  return secret;
 }
 
 void wipe_and_remove_file(const std::filesystem::path& path) {
@@ -211,77 +227,117 @@ void wipe_and_remove_file(const std::filesystem::path& path) {
 UnlockService::UnlockService(std::filesystem::path vault_dir, std::string expected_login)
     : vault_dir_(std::move(vault_dir)), expected_login_(std::move(expected_login)) {}
 
-std::string UnlockService::create_token(const UnlockRequestSpec& spec) {
+std::string UnlockService::create_token_for(const UnlockRequestSpec& spec, UnlockMode mode,
+                                            std::filesystem::path source_file) {
   std::string token = random_token();
-  tokens_[token] =
-      TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, false, false, {}};
+  tokens_[token] = TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, mode,
+                               std::move(source_file)};
   return token;
 }
 
+std::string UnlockService::create_token(const UnlockRequestSpec& spec) {
+  return create_token_for(spec, UnlockMode::Unlock);
+}
+
 std::string UnlockService::create_store_token(const UnlockRequestSpec& spec) {
-  std::string token = random_token();
-  tokens_[token] =
-      TokenRecord{spec, std::chrono::steady_clock::now() + spec.ttl, false, true, false, {}};
-  return token;
+  return create_token_for(spec, UnlockMode::Store);
 }
 
 std::string UnlockService::create_store_file_token(const UnlockRequestSpec& spec,
                                                    std::filesystem::path source_file) {
-  std::string token = random_token();
-  tokens_[token] = TokenRecord{
-      spec, std::chrono::steady_clock::now() + spec.ttl, false, true, true, std::move(source_file)};
-  return token;
+  return create_token_for(spec, UnlockMode::StoreFile, std::move(source_file));
+}
+
+std::string UnlockService::create_init_token(const UnlockRequestSpec& spec) {
+  return create_token_for(spec, UnlockMode::Init);
+}
+
+// One place that decides whether a token may act: it must exist, be unused, be presented on the
+// path matching the mode it was minted for, and be inside its TTL.
+UnlockService::TokenRecord* UnlockService::live_token(const std::string& token, UnlockMode mode) {
+  auto it = tokens_.find(token);
+  if (it == tokens_.end() || it->second.used || it->second.mode != mode ||
+      std::chrono::steady_clock::now() > it->second.expires_at) {
+    return nullptr;
+  }
+  return &it->second;
 }
 
 HttpResponse UnlockService::handle(const HttpRequest& request) {
-  std::string token = token_from_target(request.target, "/unlock/");
-  bool store_mode = false;
-  bool store_file_mode = false;
-  if (token.empty()) {
-    token = token_from_target(request.target, "/store/");
-    store_mode = true;
+  struct Route {
+    const char* prefix;
+    UnlockMode mode;
+  };
+  static constexpr Route kRoutes[] = {
+      {"/unlock/", UnlockMode::Unlock},
+      {"/store-file/", UnlockMode::StoreFile},
+      {"/store/", UnlockMode::Store},
+      {"/init/", UnlockMode::Init},
+  };
+
+  for (const auto& route : kRoutes) {
+    std::string token = token_from_target(request.target, route.prefix);
+    if (token.empty())
+      continue;
+    if (request.method == "GET")
+      return render_form(token, route.mode);
+    if (request.method == "POST")
+      return handle_submit(token, request.body, route.mode);
+    return {405, "text/plain; charset=utf-8", "Method not allowed"};
   }
-  if (token.empty()) {
-    token = token_from_target(request.target, "/store-file/");
-    store_mode = true;
-    store_file_mode = true;
-  }
-  if (token.empty())
-    return {404, "text/plain; charset=utf-8", "Not found"};
-  if (request.method == "GET")
-    return render_form(token, store_mode, store_file_mode);
-  if (request.method == "POST")
-    return handle_submit(token, request.body, store_mode, store_file_mode);
-  return {405, "text/plain; charset=utf-8", "Method not allowed"};
+  return {404, "text/plain; charset=utf-8", "Not found"};
 }
 
-HttpResponse UnlockService::render_form(const std::string& token, bool store_mode,
-                                        bool store_file_mode) {
-  auto it = tokens_.find(token);
-  if (it == tokens_.end() || it->second.used || it->second.store_mode != store_mode ||
-      it->second.store_file_mode != store_file_mode ||
-      std::chrono::steady_clock::now() > it->second.expires_at) {
+HttpResponse UnlockService::render_form(const std::string& token, UnlockMode mode) {
+  const TokenRecord* record = live_token(token, mode);
+  if (record == nullptr)
     return {410, "text/plain; charset=utf-8", "Unlock link expired"};
-  }
-  const auto& spec = it->second.spec;
-  std::string title = store_mode ? "Alfie Vault Store" : "Alfie Vault Unlock";
+
+  const auto& spec = record->spec;
+  const bool init_mode = mode == UnlockMode::Init;
+
+  std::string title = "Alfie Vault Unlock";
   std::string action_path = "/unlock/";
-  if (store_file_mode) {
+  std::string button = "Unlock once";
+  if (init_mode) {
+    title = "Alfie Vault First-Time Setup";
+    action_path = "/init/";
+    button = "Create vault";
+  } else if (mode == UnlockMode::StoreFile) {
+    title = "Alfie Vault Store";
     action_path = "/store-file/";
-  } else if (store_mode) {
+    button = "Store once";
+  } else if (mode == UnlockMode::Store) {
+    title = "Alfie Vault Store";
     action_path = "/store/";
+    button = "Store once";
   }
-  std::string value_field;
-  if (store_file_mode) {
-    value_field =
+
+  std::string meta_lines;
+  if (init_mode) {
+    meta_lines =
+        "<p class=\"meta\">This creates the vault and fixes its login and master password. "
+        "There is no recovery: if the master password is lost, every record is unreadable.</p>";
+  } else {
+    meta_lines = "<p class=\"meta\">Domain: " + html_escape(spec.domain) +
+                 "</p><p class=\"meta\">Action: " + html_escape(spec.action) + "</p>";
+  }
+
+  std::string extra_field;
+  if (init_mode) {
+    extra_field =
+        "<label>Confirm vault password <input name=\"confirm\" type=\"password\" "
+        "autocomplete=\"new-password\"></label>";
+  } else if (mode == UnlockMode::StoreFile) {
+    extra_field =
         "<p>No secret value will be shown. The server will encrypt the prepared file "
         "after successful unlock, then remove it from disk.</p>";
-  } else if (store_mode) {
-    value_field =
+  } else if (mode == UnlockMode::Store) {
+    extra_field =
         "<label>Secret JSON <textarea name=\"value\" "
         "autocomplete=\"off\"></textarea></label><br>";
   }
-  std::string button = store_mode ? "Store once" : "Unlock once";
+  const std::string password_autocomplete = init_mode ? "new-password" : "current-password";
   std::string body =
       "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
       "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\">"
@@ -307,70 +363,107 @@ HttpResponse UnlockService::render_form(const std::string& token, bool store_mod
       "(max-width:540px){body{padding:12px;align-items:stretch}.card{border-radius:14px;padding:"
       "18px}}"
       "</style></head><body><main class=\"card\"><h1>" +
-      title + "</h1><p class=\"meta\">Domain: " + html_escape(spec.domain) +
-      "</p><p class=\"meta\">Action: " + html_escape(spec.action) +
-      "</p><form method=\"post\" action=\"" + action_path + html_escape(token) +
+      title + "</h1>" + meta_lines + "<form method=\"post\" action=\"" + action_path +
+      html_escape(token) +
       "\"><label>Login <input name=\"login\" autocomplete=\"username\" autocapitalize=\"none\" "
       "spellcheck=\"false\" inputmode=\"text\"></label>"
       "<label>Vault password <input name=\"password\" type=\"password\" "
-      "autocomplete=\"current-password\"></label>" +
-      value_field + "<button type=\"submit\">" + button + "</button></form></main></body></html>";
+      "autocomplete=\"" +
+      password_autocomplete + "\"></label>" + extra_field + "<button type=\"submit\">" + button +
+      "</button></form></main></body></html>";
   return {200, "text/html; charset=utf-8", body};
 }
 
 HttpResponse UnlockService::handle_submit(const std::string& token, const std::string& form_body,
-                                          bool store_mode, bool store_file_mode) {
-  auto it = tokens_.find(token);
-  if (it == tokens_.end() || it->second.used || it->second.store_mode != store_mode ||
-      it->second.store_file_mode != store_file_mode ||
-      std::chrono::steady_clock::now() > it->second.expires_at) {
+                                          UnlockMode mode) {
+  TokenRecord* record = live_token(token, mode);
+  if (record == nullptr)
     return {410, "text/plain; charset=utf-8", "Unlock link expired"};
-  }
+
   auto fields = parse_form(form_body);
   auto login = fields.find("login");
   auto password = fields.find("password");
   if (login == fields.end() || password == fields.end())
     return {400, "text/plain; charset=utf-8", "Missing login or password"};
-  if (login->second != expected_login_)
+
+  // Move the password out of the parsed form and into secure memory at once, so the only
+  // remaining copy is locked, dump-excluded, and wiped when this function returns.
+  SecureBuffer master_password(password->second);
+  OPENSSL_cleanse(password->second.data(), password->second.size());
+  password->second.clear();
+
+  if (mode == UnlockMode::Init) {
+    auto confirm = fields.find("confirm");
+    const bool matched =
+        confirm != fields.end() && confirm->second.size() == master_password.size() &&
+        CRYPTO_memcmp(confirm->second.data(), master_password.data(), master_password.size()) == 0;
+    if (confirm != fields.end()) {
+      OPENSSL_cleanse(confirm->second.data(), confirm->second.size());
+      confirm->second.clear();
+    }
+    if (!matched)
+      return {400, "text/plain; charset=utf-8", "Passwords do not match"};
+    try {
+      init_vault(vault_dir_, login->second, master_password);
+    } catch (const std::exception&) {
+      return {409, "text/plain; charset=utf-8", "Vault setup failed"};
+    }
+    record->used = true;
+    return {201, "text/html; charset=utf-8",
+            "<html><body>Vault created. Login and master password are set.</body></html>"};
+  }
+
+  if (!vault_initialized(vault_dir_))
+    return {409, "text/plain; charset=utf-8", "Vault is not initialized"};
+
+  // One Argon2id derivation covers both the credential check and the record operation: the
+  // session verifies login + master password against the stored verifiers, then holds the
+  // derived keys for exactly this request. Legacy ALFIEVAULT1 vaults have no verifiers and fall
+  // back to the login supplied at server start.
+  const bool has_verifiers = vault_has_credentials(vault_dir_);
+  if (!has_verifiers && login->second != expected_login_)
     return {403, "text/plain; charset=utf-8", "Bad login"};
 
-  const auto spec = it->second.spec;
+  std::optional<VaultSession> session;
   try {
-    ChunkVault vault(vault_dir_);
-    if (store_file_mode) {
-      std::string file_secret = read_file_secret(it->second.source_file);
-      SecureBuffer secret_value(file_secret);
-      vault.put(spec.purpose, spec.domain, spec.account, password->second, secret_value.str());
+    session.emplace(has_verifiers ? VaultSession::open(vault_dir_, login->second, master_password)
+                                  : VaultSession::open_with_password(vault_dir_, master_password));
+  } catch (const std::exception&) {
+    return {403, "text/plain; charset=utf-8", "Bad login or password"};
+  }
+
+  const auto spec = record->spec;
+  try {
+    if (mode == UnlockMode::StoreFile) {
+      SecureBuffer secret_value = read_file_secret(record->source_file);
+      session->put(spec.purpose, spec.domain, spec.account, secret_value);
       last_delivery_ =
           DeliveredSecret{token, spec.domain, spec.account, spec.action, secret_value.size()};
-      OPENSSL_cleanse(file_secret.data(), file_secret.size());
-      wipe_and_remove_file(it->second.source_file);
-    } else if (store_mode) {
+      wipe_and_remove_file(record->source_file);
+    } else if (mode == UnlockMode::Store) {
       auto value = fields.find("value");
       if (value == fields.end() || value->second.empty())
         return {400, "text/plain; charset=utf-8", "Missing secret value"};
       SecureBuffer secret_value(value->second);
-      vault.put(spec.purpose, spec.domain, spec.account, password->second, secret_value.str());
+      OPENSSL_cleanse(value->second.data(), value->second.size());
+      value->second.clear();
+      session->put(spec.purpose, spec.domain, spec.account, secret_value);
       last_delivery_ =
           DeliveredSecret{token, spec.domain, spec.account, spec.action, secret_value.size()};
-      value->second.assign(value->second.size(), '\0');
     } else {
-      vault.use(spec.purpose, spec.domain, spec.account, password->second,
-                [&](const SecureBuffer& secret) {
-                  // Real browser-worker delivery will use encrypted IPC. Until that integration,
-                  // store only metadata proving that one secret was unlocked; never store payload.
-                  last_delivery_ =
-                      DeliveredSecret{token, spec.domain, spec.account, spec.action, secret.size()};
-                });
+      session->use(spec.purpose, spec.domain, spec.account, [&](const SecureBuffer& secret) {
+        // Real browser-worker delivery will use encrypted IPC. Until that integration, store
+        // only metadata proving that one secret was unlocked; never store payload.
+        last_delivery_ =
+            DeliveredSecret{token, spec.domain, spec.account, spec.action, secret.size()};
+      });
     }
-    it->second.used = true;
-    password->second.assign(password->second.size(), '\0');
+    record->used = true;
     return {200, "text/html; charset=utf-8",
-            store_mode
-                ? "<html><body>Stored.</body></html>"
-                : "<html><body>Unlocked. Credential delivered to local worker.</body></html>"};
+            mode == UnlockMode::Unlock
+                ? "<html><body>Unlocked. Credential delivered to local worker.</body></html>"
+                : "<html><body>Stored.</body></html>"};
   } catch (const std::exception&) {
-    password->second.assign(password->second.size(), '\0');
     return {403, "text/plain; charset=utf-8", "Unlock failed"};
   }
 }
@@ -411,55 +504,6 @@ std::string http_response_text(const HttpResponse& response) {
       << "Connection: close\r\n\r\n"
       << response.body;
   return out.str();
-}
-
-int run_http_unlock_server(UnlockService& service, const std::string& bind_host, int port,
-                           int max_requests) {
-  int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (fd < 0)
-    throw sys_error("socket");
-  int yes = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(static_cast<uint16_t>(port));
-  if (inet_pton(AF_INET, bind_host.c_str(), &addr.sin_addr) != 1) {
-    close(fd);
-    throw std::runtime_error("bind host must be IPv4 address");
-  }
-  if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
-    int saved = errno;
-    close(fd);
-    errno = saved;
-    throw sys_error("bind");
-  }
-  if (listen(fd, 16) != 0) {
-    int saved = errno;
-    close(fd);
-    errno = saved;
-    throw sys_error("listen");
-  }
-
-  int handled = 0;
-  while (max_requests < 0 || handled < max_requests) {
-    int client = accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
-    if (client < 0) {
-      if (errno == EINTR)
-        continue;
-      int saved = errno;
-      close(fd);
-      errno = saved;
-      throw sys_error("accept");
-    }
-    std::string raw = read_http_plain(client);
-    auto response = http_response_text(service.handle(parse_http_request(raw)));
-    (void)write(client, response.data(), response.size());
-    close(client);
-    ++handled;
-  }
-  close(fd);
-  return handled;
 }
 
 int run_https_unlock_server(UnlockService& service, const std::string& bind_host, int port,
@@ -510,7 +554,7 @@ int run_https_unlock_server(UnlockService& service, const std::string& bind_host
 
   int handled = 0;
   while (max_requests < 0 || handled < max_requests) {
-    int client = accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
+    int client = accept_cloexec(fd);
     if (client < 0) {
       if (errno == EINTR)
         continue;
