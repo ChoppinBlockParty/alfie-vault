@@ -214,8 +214,13 @@ SecureBuffer alfie::decryptIpcMessage(const SecureBuffer &sessionKey,
     throw CryptoError("bad IPC session key size");
   if (frame.nonce.size() != kNonceLen)
     throw CryptoError("bad IPC nonce size");
+  // Authenticate before claiming the nonce. Recording it first lets an
+  // unauthenticated frame burn a nonce of its choosing: the forgery still
+  // fails the tag check, but the genuine frame carrying that nonce is then
+  // refused as a replay and the delivery is silently lost.
+  SecureBuffer plaintext = decryptGcm(sessionKey, frame.nonce,
+                                      frame.ciphertextAndTag, context.aad());
   if (!replayGuard.accept(context.token, frame.nonce))
     throw CryptoError("replayed IPC frame");
-  return decryptGcm(sessionKey, frame.nonce, frame.ciphertextAndTag,
-                    context.aad());
+  return plaintext;
 }

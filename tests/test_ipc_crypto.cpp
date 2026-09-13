@@ -109,3 +109,34 @@ TEST_CASE("A frame is bound to its token, domain and action", "[ipc][aad]") {
                         tampered, frame, guard),
       CryptoError);
 }
+
+TEST_CASE("A forged frame cannot burn a genuine frame's nonce",
+          "[ipc][replay]") {
+  const IpcKeyPair sender = generateIpcKeypair();
+  const IpcKeyPair receiver = generateIpcKeypair();
+  const IpcRequestContext context{"token-forge", "example.com", "fill"};
+  const SecureBuffer sendKey =
+      deriveIpcSessionKey(sender.privateKey, receiver.publicKey, context);
+  const SecureBuffer receiveKey =
+      deriveIpcSessionKey(receiver.privateKey, sender.publicKey, context);
+
+  const SecureBuffer plaintext{std::string(R"({"secret":"IPC-FORGE"})")};
+  const IpcFrame genuine = encryptIpcMessage(sendKey, context, plaintext);
+
+  ReplayGuard guard;
+  // The nonce must be claimed only by a frame that authenticates. If the guard
+  // recorded it first, this forgery would still fail its tag check but would
+  // take the genuine frame's nonce down with it, and the real delivery below
+  // would be dropped as a replay.
+  const IpcFrame forged{genuine.nonce, std::vector<unsigned char>(32, 0xAB)};
+  CHECK_THROWS_AS(decryptIpcMessage(receiveKey, context, forged, guard),
+                  CryptoError);
+
+  const SecureBuffer delivered =
+      decryptIpcMessage(receiveKey, context, genuine, guard);
+  CHECK(delivered.str() == R"({"secret":"IPC-FORGE"})");
+
+  // A real replay is still refused.
+  CHECK_THROWS_AS(decryptIpcMessage(receiveKey, context, genuine, guard),
+                  CryptoError);
+}
