@@ -71,6 +71,30 @@ Found while validating the rules above, and fixed:
 - **A wrong master password reported "record not found".** The stored verifiers exist precisely
   to tell those two cases apart, but only the HTTPS path consulted them. `VaultSession` now
   checks the password verifier on every open.
+- **The master password floor applied to one of two init paths.** `kMinimumMasterPasswordLength`
+  lived in `http_unlock.h` and was checked only by the HTTPS setup form, so
+  `alfie-vault init-vault` would fix a vault's password at a single character -- permanently,
+  since it can never be changed. The constant moved to `vault.h` and the check into `initVault()`,
+  which is the one function that creates a vault, so both paths now pass through it.
+- **Record writes were neither atomic nor durable.** `writeFile` opened with `trunc` and never
+  called `fsync`, so re-storing a record destroyed the old ciphertext before the new bytes
+  reached the medium: a crash in that window lost the credential outright, and a record is the
+  one thing here that cannot be regenerated. Writes now go to a temporary in the same directory,
+  are fsynced, then `rename(2)`-d over the target, with the directory fsynced after. `vault.meta`
+  is written the same way -- a half-written one is a directory that reads as a vault but can
+  never derive its keys. The temporary is created 0600 rather than widened afterwards, matching
+  `writePrivateFile()` in `ca.cpp`.
+- **A failed first-time install was an unrecoverable dead end.** `runFirstTimeInstall` creates the
+  vault before generating the CA; if anything after `initVault()` threw, the catch returned a flat
+  409 and left the vault behind. Since `serve-init-tls` refuses to start while `vault.meta`
+  exists, the operator was stranded with a master password they never saw confirmed, no CA and no
+  second run. The failure path now rolls the vault back and leaves the token live, so reloading
+  the link is a real retry.
+- **The IPC `ReplayGuard` claimed nonces before authenticating.** `decryptIpcMessage` recorded
+  `(token, nonce)` and only then verified the GCM tag, so a forged frame could burn a nonce of
+  its choosing: the forgery failed its own tag check, but the genuine frame carrying that nonce
+  was then refused as a replay and the delivery was silently lost. The tag is now checked first
+  and the nonce claimed only by a frame that authenticates.
 
 ## Must improve next
 
@@ -82,9 +106,13 @@ Found while validating the rules above, and fixed:
    success even where its internal `mlock` was refused, so `SecureHeap == true` is weaker than
    "locked". Strict mode should probe this rather than trust the flag.
 4. The IPC `ReplayGuard` keeps every `(token, nonce)` pair it has ever seen in memory, with no
-   eviction -- an unbounded growth path in a long-running server.
+   eviction -- an unbounded growth path in a long-running server. (The ordering bug above is
+   fixed; the growth is not.)
 5. Rate-limit and audit-log failed unlock attempts. A token is single-use and TTL-bound, but
-   within its window a wrong password can be retried without limit or trace.
+   within its window a wrong password can be retried without limit or trace. One Argon2id
+   derivation measures ~0.13s and the server handles one connection at a time, so a leaked link
+   allows very roughly 2,000 guesses inside the default 300s TTL -- bounded, but only by the TTL,
+   and the setup path already has the shape of the fix in its `setupFailures` counter.
 
 ## Sources
 
