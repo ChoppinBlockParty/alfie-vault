@@ -12,6 +12,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <string>
+#include <sys/stat.h>
 #include <type_traits>
 #include <unistd.h>
 
@@ -420,4 +421,34 @@ TEST_CASE_METHOD(VaultDir, "Every vault file is private to the owner",
     CAPTURE(entry.path().string());
     CHECK(ownerOnly(entry.path()));
   }
+}
+
+TEST_CASE_METHOD(VaultDir, "A record is replaced atomically, not truncated",
+                 "[vault][durability]") {
+  initVault(this->path, "yuki", kPassphrase);
+  ChunkVault vault(this->path);
+  const auto record = vault.put("account", "example.com", "u", kPassphrase,
+                                R"({"secret":"first"})");
+
+  struct stat before{};
+  REQUIRE(::stat(record.c_str(), &before) == 0);
+
+  // A record is the one thing in this vault that cannot be regenerated, so
+  // re-storing one must publish the new ciphertext with rename(2) rather than
+  // truncate the old one in place: a crash between the truncate and the last
+  // write would destroy the only copy. A fresh inode is the evidence that the
+  // replacement went through a temporary file.
+  REQUIRE(vault.put("account", "example.com", "u", kPassphrase,
+                    R"({"secret":"second"})") == record);
+  struct stat after{};
+  REQUIRE(::stat(record.c_str(), &after) == 0);
+  CHECK(before.st_ino != after.st_ino);
+
+  CHECK(vault.get("account", "example.com", "u", kPassphrase) ==
+        R"({"secret":"second"})");
+
+  // Nothing of the temporary survives the rename.
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(this->path))
+    CHECK(entry.path().extension() != ".tmp");
 }

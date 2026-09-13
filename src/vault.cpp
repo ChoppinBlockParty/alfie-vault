@@ -8,7 +8,9 @@
 #include <argon2.h>
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -18,6 +20,7 @@
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <sstream>
+#include <unistd.h>
 
 using namespace alfie;
 
@@ -98,6 +101,71 @@ static std::string nulJoin(std::initializer_list<std::string> fields) {
   return out;
 }
 
+// A rename only becomes durable once the directory entry holding it is
+// flushed, so a crash cannot leave the old name pointing at freed blocks.
+static void fsyncDirectory(const std::filesystem::path &dir) {
+  const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (fd < 0)
+    return;
+  ::fsync(fd);
+  ::close(fd);
+}
+
+// Writes a file that either appears complete or does not appear at all.
+//
+// A record is the one thing here that cannot be regenerated, and put()
+// overwrites in place: truncating the old ciphertext and then losing power
+// before the new bytes reach the medium would destroy the credential outright.
+// Writing a temporary beside the target, fsyncing it, then rename(2)-ing over
+// the target makes the replacement atomic, and fsyncing the directory makes
+// the rename itself durable. Created 0600 from the start rather than widened
+// afterwards, matching writePrivateFile() in ca.cpp.
+static void writeFileAtomically(const std::filesystem::path &p,
+                                const std::vector<unsigned char> &data) {
+  const auto dir = p.parent_path();
+  const auto suffix = randomBytes(8);
+  // A random suffix so two writers racing on one record cannot share a
+  // temporary and splice each other's bytes together.
+  const auto temp = dir / ("." + p.filename().string() + "." +
+                           hex(suffix.data(), suffix.size()) + ".tmp");
+
+  const int fd =
+      ::open(temp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+  if (fd < 0)
+    throw CryptoError("cannot create " + temp.string());
+
+  try {
+    const unsigned char *cursor = data.data();
+    size_t remaining = data.size();
+    while (remaining > 0) {
+      const ssize_t written = ::write(fd, cursor, remaining);
+      if (written < 0 && errno == EINTR)
+        continue;
+      if (written <= 0)
+        throw CryptoError("cannot write " + temp.string());
+      cursor += written;
+      remaining -= static_cast<size_t>(written);
+    }
+    // The bytes must be on the medium before the rename publishes them.
+    if (::fsync(fd) != 0)
+      throw CryptoError("cannot flush " + temp.string());
+  } catch (...) {
+    ::close(fd);
+    std::error_code ec;
+    std::filesystem::remove(temp, ec);
+    throw;
+  }
+  ::close(fd);
+
+  std::error_code ec;
+  std::filesystem::rename(temp, p, ec);
+  if (ec) {
+    std::filesystem::remove(temp, ec);
+    throw CryptoError("cannot replace " + p.string());
+  }
+  fsyncDirectory(dir);
+}
+
 static void writeFile(const std::filesystem::path &p,
                       const std::vector<unsigned char> &data) {
   std::filesystem::create_directories(p.parent_path());
@@ -109,15 +177,7 @@ static void writeFile(const std::filesystem::path &p,
     if (dir.filename() == "records")
       break;
   }
-  std::ofstream out(p, std::ios::binary | std::ios::trunc);
-  out.write(reinterpret_cast<const char *>(data.data()),
-            static_cast<std::streamsize>(data.size()));
-  out.flush();
-  std::error_code ec;
-  std::filesystem::permissions(p,
-                               std::filesystem::perms::owner_read |
-                                   std::filesystem::perms::owner_write,
-                               std::filesystem::perm_options::replace, ec);
+  writeFileAtomically(p, data);
 }
 
 static std::vector<unsigned char> readFile(const std::filesystem::path &p) {
@@ -484,22 +544,17 @@ void alfie::initVault(const std::filesystem::path &root,
   // The vault directory is private to this user: record filenames are HMACs,
   // but their count, sizes and timestamps still leak how the vault is used.
   std::filesystem::permissions(root, std::filesystem::perms::owner_all);
-  const auto metaPath = metaPathFor(root);
-  std::ofstream out(metaPath, std::ios::binary | std::ios::trunc);
-  if (!out)
-    throw CryptoError("cannot write vault metadata");
-  out << kMetaV2 << "\n"
-      << hex(salt.data(), salt.size()) << "\n"
-      << "argon2id m=" << params.mCostKib << ",t=" << params.tCost
-      << ",p=" << params.parallelism << "\n"
-      << "login_verifier " << loginVerifier << "\n"
-      << "password_verifier " << passwordVerifier << "\n";
-  out.flush();
-  if (!out)
-    throw CryptoError("cannot write vault metadata");
-  std::filesystem::permissions(metaPath,
-                               std::filesystem::perms::owner_read |
-                                   std::filesystem::perms::owner_write);
+  std::ostringstream meta;
+  meta << kMetaV2 << "\n"
+       << hex(salt.data(), salt.size()) << "\n"
+       << "argon2id m=" << params.mCostKib << ",t=" << params.tCost
+       << ",p=" << params.parallelism << "\n"
+       << "login_verifier " << loginVerifier << "\n"
+       << "password_verifier " << passwordVerifier << "\n";
+  // vault.meta is what makes the vault exist; a half-written one would be a
+  // directory that reads as a vault but can never derive its keys.
+  const std::string text = meta.str();
+  writeFileAtomically(metaPathFor(root), {text.begin(), text.end()});
 }
 
 bool alfie::verifyCredentials(const std::filesystem::path &root,
