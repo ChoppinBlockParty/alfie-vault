@@ -463,8 +463,13 @@ void alfie::initVault(const std::filesystem::path &root,
                       const std::string &login, SecureBuffer &passphrase) {
   if (login.empty())
     throw CryptoError("login must not be empty");
-  if (passphrase.empty())
-    throw CryptoError("master password must not be empty");
+  // Checked here rather than only at the HTTPS form: the CLI creates vaults
+  // too, and a vault's password can never be changed afterwards.
+  if (passphrase.size() < kMinimumMasterPasswordLength) {
+    throw CryptoError("master password must be at least " +
+                      std::to_string(kMinimumMasterPasswordLength) +
+                      " characters");
+  }
   if (vaultInitialized(root))
     throw CryptoError("vault already initialized");
 

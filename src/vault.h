@@ -108,6 +108,12 @@ std::string recordId(const SecureBuffer &indexKey, const std::string &purpose,
                      const std::string &domainOrUrl,
                      const std::string &account);
 
+/// The master password protects everything and can never be changed, so a
+/// length floor is enforced at the one moment it is chosen. It lives here
+/// rather than beside the HTTPS form because initVault() is what fixes the
+/// password, and every path that creates a vault goes through it.
+inline constexpr size_t kMinimumMasterPasswordLength = 12;
+
 /// First-time install. A vault must be created explicitly before any record can
 /// be stored or read: creating it is what fixes the master password and the
 /// login for that vault.
@@ -121,7 +127,8 @@ std::string recordId(const SecureBuffer &indexKey, const std::string &purpose,
 bool vaultInitialized(const std::filesystem::path &root);
 
 /// Throws if the vault already exists, so an init link can never silently
-/// re-key a live vault.
+/// re-key a live vault, and if the master password is shorter than
+/// kMinimumMasterPasswordLength.
 void initVault(const std::filesystem::path &root, const std::string &login,
                SecureBuffer &passphrase);
 

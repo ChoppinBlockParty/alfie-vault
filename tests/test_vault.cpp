@@ -228,9 +228,10 @@ TEST_CASE_METHOD(VaultDir, "A record round-trips with no plaintext on disk",
 
 TEST_CASE_METHOD(VaultDir, "A wrong passphrase does not open a record",
                  "[record][auth]") {
-  initVault(this->path, "yuki", "right pass");
+  initVault(this->path, "yuki", "right passphrase");
   ChunkVault vault(this->path);
-  vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
+  vault.put("account", "example.com", "u", "right passphrase",
+            R"({"secret":"s"})");
 
   CHECK_THROWS_AS(vault.get("account", "example.com", "u", "wrong pass"),
                   CryptoError);
@@ -238,12 +239,13 @@ TEST_CASE_METHOD(VaultDir, "A wrong passphrase does not open a record",
 
 TEST_CASE_METHOD(VaultDir, "A record can be used without returning a string",
                  "[record][use]") {
-  initVault(this->path, "yuki", "right pass");
+  initVault(this->path, "yuki", "right passphrase");
   ChunkVault vault(this->path);
-  vault.put("account", "example.com", "u", "right pass", R"({"secret":"s"})");
+  vault.put("account", "example.com", "u", "right passphrase",
+            R"({"secret":"s"})");
 
   size_t seenSize = 0;
-  vault.use("account", "example.com", "u", "right pass",
+  vault.use("account", "example.com", "u", "right passphrase",
             [&](const SecureBuffer &secret) {
               seenSize = secret.size();
               CHECK(secret.str() == R"({"secret":"s"})");
@@ -297,38 +299,56 @@ TEST_CASE_METHOD(VaultDir, "A vault never springs into existence",
 
 TEST_CASE_METHOD(VaultDir, "Init sets credentials and cannot be repeated",
                  "[vault][init]") {
-  initVault(this->path, "yuki", "master pass");
+  initVault(this->path, "yuki", "master passphrase");
 
   CHECK(vaultInitialized(this->path));
   CHECK(vaultHasCredentials(this->path));
 
   SECTION("a second init must never re-key a live vault") {
-    CHECK_THROWS_AS(initVault(this->path, "someone-else", "other pass"),
+    CHECK_THROWS_AS(initVault(this->path, "someone-else", "other passphrase"),
                     CryptoError);
   }
 
   SECTION("both the login and the password are checked") {
-    CHECK(verifyCredentials(this->path, "yuki", "master pass"));
+    CHECK(verifyCredentials(this->path, "yuki", "master passphrase"));
     CHECK_FALSE(verifyCredentials(this->path, "yuki", "wrong pass"));
-    CHECK_FALSE(verifyCredentials(this->path, "wrong-login", "master pass"));
+    CHECK_FALSE(
+        verifyCredentials(this->path, "wrong-login", "master passphrase"));
   }
 
   SECTION("neither credential is recoverable from vault.meta") {
     const std::string meta = readFile(this->path / "vault.meta");
     CHECK_THAT(meta, !Catch::Matchers::ContainsSubstring("yuki"));
-    CHECK_THAT(meta, !Catch::Matchers::ContainsSubstring("master pass"));
+    CHECK_THAT(meta, !Catch::Matchers::ContainsSubstring("master passphrase"));
     CHECK_THAT(meta, Catch::Matchers::ContainsSubstring("ALFIEVAULT2"));
   }
 }
 
 TEST_CASE_METHOD(VaultDir, "Init rejects empty credentials", "[vault][init]") {
-  CHECK_THROWS_AS(initVault(this->path / "a", "", "pass"), CryptoError);
+  CHECK_THROWS_AS(initVault(this->path / "a", "", "long enough passphrase"),
+                  CryptoError);
   CHECK_THROWS_AS(initVault(this->path / "b", "yuki", ""), CryptoError);
 }
 
+TEST_CASE_METHOD(VaultDir, "Init refuses a master password below the floor",
+                 "[vault][init]") {
+  // The floor belongs here rather than beside the HTTPS form: the CLI creates
+  // vaults too, and a vault's master password can never be changed afterwards,
+  // so this is the only moment a hopeless one can be refused.
+  const std::string tooShort(kMinimumMasterPasswordLength - 1, 'a');
+  const std::string justLong(kMinimumMasterPasswordLength, 'a');
+
+  CHECK_THROWS_AS(initVault(this->path / "short", "yuki", tooShort),
+                  CryptoError);
+  CHECK_FALSE(vaultInitialized(this->path / "short"));
+
+  CHECK_NOTHROW(initVault(this->path / "ok", "yuki", justLong));
+  CHECK(verifyCredentials(this->path / "ok", "yuki", justLong));
+}
+
 TEST_CASE_METHOD(VaultDir, "The stored Argon2id cost is used", "[vault][kdf]") {
-  initVault(this->path, "yuki", "master pass");
-  REQUIRE(verifyCredentials(this->path, "yuki", "master pass"));
+  initVault(this->path, "yuki", "master passphrase");
+  REQUIRE(verifyCredentials(this->path, "yuki", "master passphrase"));
 
   // The cost line in vault.meta must be load-bearing, not decorative: if it
   // were ignored, a future build that raised the cost would silently derive a
@@ -348,7 +368,7 @@ TEST_CASE_METHOD(VaultDir, "The stored Argon2id cost is used", "[vault][kdf]") {
 
   // A different cost derives a different key, so the verifiers no longer
   // match.
-  CHECK_FALSE(verifyCredentials(this->path, "yuki", "master pass"));
+  CHECK_FALSE(verifyCredentials(this->path, "yuki", "master passphrase"));
 }
 
 TEST_CASE_METHOD(VaultDir, "Legacy V1 records stay readable and upgrade",

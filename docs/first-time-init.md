@@ -66,7 +66,9 @@ trust. Only the second one lives in the vault.
 ## Rules the setup enforces
 
 - **Master password minimum 12 characters.** It can never be changed, so the moment it is chosen
-  is the only chance to refuse a hopeless one.
+  is the only chance to refuse a hopeless one. The floor is `kMinimumMasterPasswordLength` in
+  `vault.h` and is enforced inside `initVault()`, so `alfie-vault init-vault` gets the same
+  refusal as this page rather than only the form checking it.
 - **Typed twice.** A typo would otherwise become an unrecoverable vault.
 - **Login must not be empty.**
 - **One-time token**, like every other link.

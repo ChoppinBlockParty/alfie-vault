@@ -57,10 +57,6 @@ inline constexpr char kCaKeyPurpose[] = "secret-file";
 inline constexpr char kCaKeyDomain[] = "alfie.local.ca";
 inline constexpr char kCaKeyAccount[] = "alfie-local-ca-key.pem";
 
-/// The master password protects everything and can never be changed, so a
-/// length floor is enforced at the one moment it is chosen.
-inline constexpr size_t kMinimumMasterPasswordLength = 12;
-
 /// Scope a one-time authorization to one record, action and expiry interval.
 struct UnlockRequestSpec {
   std::string purpose;

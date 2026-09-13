@@ -48,9 +48,9 @@ struct TempRoot {
 
   /// A vault with one record in it, ready to unlock.
   void prepareVault() const {
-    initVault(this->dir, "yuki", "master pass");
+    initVault(this->dir, "yuki", "master passphrase");
     ChunkVault vault(this->dir);
-    vault.put("account", "example.com", "yuki@example.com", "master pass",
+    vault.put("account", "example.com", "yuki@example.com", "master passphrase",
               R"({"secret":"VERY-SECRET-HTTP"})");
   }
 
@@ -127,7 +127,7 @@ TEST_CASE_METHOD(TempRoot, "A submitted unlock happens once",
   this->prepareVault();
   UnlockService service(this->dir, "yuki");
   const std::string token = service.createToken(unlockSpec());
-  const std::string body = "login=yuki&password=master+pass";
+  const std::string body = "login=yuki&password=master+passphrase";
 
   const HttpResponse response = service.handle(post("/unlock/" + token, body));
 
@@ -151,23 +151,24 @@ TEST_CASE_METHOD(TempRoot, "A bad login does not consume the token",
   const std::string token = service.createToken(unlockSpec());
 
   const HttpResponse bad = service.handle(
-      post("/unlock/" + token, "login=wrong&password=master+pass"));
+      post("/unlock/" + token, "login=wrong&password=master+passphrase"));
 
   CHECK(bad.status == 403);
   CHECK_FALSE(service.lastDelivery().has_value());
 
   // A typo must not cost the person their link.
   CHECK(service
-            .handle(post("/unlock/" + token, "login=yuki&password=master+pass"))
+            .handle(post("/unlock/" + token,
+                         "login=yuki&password=master+passphrase"))
             .status == 200);
 }
 
 TEST_CASE_METHOD(TempRoot, "The vault's own verifier decides the credentials",
                  "[http][unlock][auth]") {
-  initVault(this->dir, "yuki", "master pass");
+  initVault(this->dir, "yuki", "master passphrase");
   {
     ChunkVault vault(this->dir);
-    vault.put("account", "example.com", "yuki@example.com", "master pass",
+    vault.put("account", "example.com", "yuki@example.com", "master passphrase",
               R"({"secret":"CRED-CHECK"})");
   }
 
@@ -176,11 +177,11 @@ TEST_CASE_METHOD(TempRoot, "The vault's own verifier decides the credentials",
 
   CHECK(service
             .handle(post("/unlock/" + service.createToken(unlockSpec()),
-                         "login=yuki&password=master+pass"))
+                         "login=yuki&password=master+passphrase"))
             .status == 200);
   CHECK(service
             .handle(post("/unlock/" + service.createToken(unlockSpec()),
-                         "login=attacker&password=master+pass"))
+                         "login=attacker&password=master+passphrase"))
             .status == 403);
   CHECK(service
             .handle(post("/unlock/" + service.createToken(unlockSpec()),
@@ -190,7 +191,7 @@ TEST_CASE_METHOD(TempRoot, "The vault's own verifier decides the credentials",
 
 TEST_CASE_METHOD(TempRoot, "A store link adds a secret without echoing it",
                  "[http][store]") {
-  initVault(this->dir, "yuki", "master pass");
+  initVault(this->dir, "yuki", "master passphrase");
   UnlockService service(this->dir, "yuki");
   const std::string token = service.createStoreToken(
       {"account", "new.example", "new-login", "store_secret"});
@@ -201,7 +202,7 @@ TEST_CASE_METHOD(TempRoot, "A store link adds a secret without echoing it",
   CHECK_THAT(form.body, Catch::Matchers::ContainsSubstring("name=\"value\""));
 
   const std::string body =
-      "login=yuki&password=master+pass&value=%7B%22secret%22%3A%"
+      "login=yuki&password=master+passphrase&value=%7B%22secret%22%3A%"
       "22NEW-SECRET-HTTP%22%7D";
   const HttpResponse response = service.handle(post("/store/" + token, body));
 
@@ -211,7 +212,7 @@ TEST_CASE_METHOD(TempRoot, "A store link adds a secret without echoing it",
              !Catch::Matchers::ContainsSubstring("NEW-SECRET-HTTP"));
 
   ChunkVault vault(this->dir);
-  CHECK(vault.get("account", "new.example", "new-login", "master pass") ==
+  CHECK(vault.get("account", "new.example", "new-login", "master passphrase") ==
         R"({"secret":"NEW-SECRET-HTTP"})");
   CHECK(service.handle(post("/store/" + token, body)).status == 410);
 }
@@ -223,8 +224,8 @@ TEST_CASE_METHOD(TempRoot,
   const std::string token = service.createStoreToken(
       {"account", "new.example", "new-login", "store_secret"});
 
-  const HttpResponse response = service.handle(
-      post("/store/" + token, "login=yuki&password=master+pass&value=%7B%7D"));
+  const HttpResponse response = service.handle(post(
+      "/store/" + token, "login=yuki&password=master+passphrase&value=%7B%7D"));
 
   CHECK(response.status == 409);
   CHECK_FALSE(vaultInitialized(this->dir));
@@ -360,7 +361,7 @@ TEST_CASE_METHOD(TempRoot, "A routine unlock page cannot be confused for setup",
 
 TEST_CASE_METHOD(TempRoot, "Setup is refused once a vault exists",
                  "[http][init]") {
-  initVault(this->dir, "yuki", "master pass");
+  initVault(this->dir, "yuki", "master passphrase");
   UnlockService service(this->dir, "");
   const std::string token =
       service.createInitToken({"init", "", "", "init_vault"}, this->plan());
@@ -372,7 +373,7 @@ TEST_CASE_METHOD(TempRoot, "Setup is refused once a vault exists",
 
   CHECK(response.status == 409);
   // The original credentials still stand.
-  CHECK(verifyCredentials(this->dir, "yuki", "master pass"));
+  CHECK(verifyCredentials(this->dir, "yuki", "master passphrase"));
   CHECK_FALSE(verifyCredentials(this->dir, "attacker", "Attacker-Pass-1"));
 }
 

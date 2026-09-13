@@ -97,7 +97,7 @@ def main() -> int:
             [str(binary), "init-vault", str(vault), "yuki"],
             cwd=repo,
             check=True,
-            input=b"test-pass\n",
+            input=b"test-passphrase\n",
             stdout=subprocess.DEVNULL,
         )
         subprocess.run(
@@ -110,7 +110,7 @@ def main() -> int:
             ],
             cwd=repo,
             check=True,
-            input=b'test-pass\n{"secret":"[REDACTED]"}\n',
+            input=b'test-passphrase\n{"secret":"[REDACTED]"}\n',
             stdout=subprocess.DEVNULL,
         )
         server = subprocess.Popen(
@@ -150,7 +150,7 @@ def main() -> int:
             html = urllib.request.urlopen(url, context=ctx, timeout=5).read().decode()
             assert code_match.group(1) in html
             assert "<form" in html and "name=\"password\"" in html
-            data = urllib.parse.urlencode({"login": "yuki", "password": "test-pass"}).encode()
+            data = urllib.parse.urlencode({"login": "yuki", "password": "test-passphrase"}).encode()
             request = urllib.request.Request(url, data=data, method="POST")
             body = urllib.request.urlopen(request, context=ctx, timeout=5).read().decode()
             assert "Unlocked" in body
