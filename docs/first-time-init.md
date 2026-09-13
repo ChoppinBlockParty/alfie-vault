@@ -75,6 +75,18 @@ trust. Only the second one lives in the vault.
 - **Never re-runnable.** `initVault` throws if the vault exists, so an init link can never
   re-key a live vault or overwrite existing records.
 
+## If setup fails partway
+
+The vault is created before the CA, so a failure after `initVault()` -- key generation, writing
+the certificates -- would otherwise leave a vault behind with a master password nobody saw
+confirmed. Because setup refuses to start while `vault.meta` exists, that would be a dead end
+rather than an error: no CA, no certificates, and no way to run setup again.
+
+So the failure path removes the vault it just created (`vault.meta` first, then `records/`) and
+answers `409` saying so. The setup link is deliberately **not** consumed, so reloading it is a
+real retry. Nothing outside the vault directory is touched; the public certificates a partial run
+may have written are simply overwritten by the next attempt.
+
 ## After setup
 
 Trust `alfie-local-ca-cert.pem` on the phone or laptop that will open unlock links, then serve

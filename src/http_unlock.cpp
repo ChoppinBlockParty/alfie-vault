@@ -545,6 +545,20 @@ HttpResponse UnlockService::renderForm(const std::string &token,
           renderTemplate(tmpl::kUnlockPage, data)};
 }
 
+// Undoes a first-time install that failed partway.
+//
+// Only reached when initVault() created vault.meta during this very request,
+// and serve-init-tls refuses to start against an existing vault, so everything
+// removed here was written by this attempt. Leaving it in place is the worse
+// outcome: the vault would hold a master password the operator never got
+// confirmation of, with no CA, no certificates, and no way to run setup again.
+// vault.meta goes first, so setup can restart even if the rest fails.
+static void removePartialVault(const std::filesystem::path &vaultDir) {
+  std::error_code ec;
+  std::filesystem::remove(vaultDir / "vault.meta", ec);
+  std::filesystem::remove_all(vaultDir / "records", ec);
+}
+
 // Creates the vault, then the CA, in that order. The CA private key is
 // generated in memory and stored in the vault it just created; it is never
 // written to disk. Only public certificates and the server key (0600) reach the
@@ -553,11 +567,14 @@ HttpResponse UnlockService::runFirstTimeInstall(TokenRecord &record,
                                                 const std::string &login,
                                                 SecureBuffer &password) {
   const InitPlan &plan = record.plan;
+  bool vaultCreated = false;
   try {
     // Copy directly between secure allocations; setup needs two separate
     // derivations.
     SecureBuffer forInit(SecureBytes(password.bytes()));
     initVault(this->vaultDir_, login, forInit);
+    // Past this point a failure has to undo the vault, not just report.
+    vaultCreated = true;
 
     GeneratedCertificate ca =
         generateCaCertificate(plan.caCommonName, 3650, plan.caRsaBits);
@@ -600,7 +617,13 @@ HttpResponse UnlockService::runFirstTimeInstall(TokenRecord &record,
     return {201, "text/html; charset=utf-8",
             renderTemplate(tmpl::kInitComplete, data)};
   } catch (const std::exception &) {
-    return {409, "text/plain; charset=utf-8", "Vault setup failed"};
+    if (vaultCreated)
+      removePartialVault(this->vaultDir_);
+    // The token is left live and unconsumed on purpose: with the vault gone,
+    // reloading the same link is a real retry rather than a dead end.
+    return {409, "text/plain; charset=utf-8",
+            "Vault setup failed and was rolled back. Reload the setup link to "
+            "try again."};
   }
 }
 

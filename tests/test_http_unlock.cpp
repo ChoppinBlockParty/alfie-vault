@@ -454,3 +454,30 @@ TEST_CASE_METHOD(TempRoot, "The setup code is separate and attempt-limited",
     CHECK(service.handle(post("/init/" + token, body)).status == 410);
   }
 }
+
+TEST_CASE_METHOD(TempRoot, "A setup that fails partway rolls the vault back",
+                 "[http][init]") {
+  UnlockService service(this->dir, "");
+  InitPlan plan = this->plan();
+  // Refused by RSA key generation, which runs after initVault has already
+  // fixed the login and master password.
+  plan.caRsaBits = 1;
+  const std::string token =
+      service.createInitToken({"init", "", "", "init_vault"}, plan);
+
+  const HttpResponse failed = service.handle(
+      post("/init/" + token, "setup_code=" + service.setupCode(token).str() +
+                                 "&login=yuki&password=Correct-Horse-9"
+                                 "&confirm=Correct-Horse-9"));
+
+  CHECK(failed.status == 409);
+  // Leaving the vault behind would be a dead end rather than an error:
+  // serve-init-tls refuses to start while a vault exists, so the operator
+  // would be stuck with a master password they never saw confirmed, no CA and
+  // no way to run setup a second time.
+  CHECK_FALSE(vaultInitialized(this->dir));
+  CHECK_FALSE(service.finished());
+
+  // The link is deliberately left live, so reloading it is a real retry.
+  CHECK(service.handle(get("/init/" + token)).status == 200);
+}
