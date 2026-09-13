@@ -225,36 +225,49 @@ TEST_CASE_METHOD(OneRecord, "A wrong passphrase is rejected",
 
 TEST_CASE_METHOD(OneRecord, "Random mutations never yield wrong plaintext",
                  "[corruption][fuzz]") {
-  // The constant seed is the point: a failing sweep has to be replayable.
-  // NOLINTNEXTLINE(bugprone-random-generator-seed)
-  std::mt19937 rng(0xA1F1E);
-  std::uniform_int_distribution<size_t> pick(0, this->original.size() - 1);
-  std::uniform_int_distribution<int> byteValue(0, 255);
-  std::uniform_int_distribution<size_t> mutationCount(1, 4);
-
-  for (int iteration = 0; iteration < 400; ++iteration) {
-    std::vector<unsigned char> mutated = this->original;
-    bool changed = false;
-    const size_t mutations = mutationCount(rng);
-    for (size_t m = 0; m < mutations; ++m) {
-      const size_t index = pick(rng);
-      const auto replacement = static_cast<unsigned char>(byteValue(rng));
-      if (replacement != mutated[index])
-        changed = true;
-      mutated[index] = replacement;
-    }
+  auto checkMutation = [&](const std::vector<unsigned char> &mutated) {
+    // Repeated writes to one byte can undo each other. Only the final bytes
+    // determine whether authentication should fail.
+    const bool changed = mutated != this->original;
+    CAPTURE(changed);
     writeBytes(this->record, mutated);
-
-    CAPTURE(iteration, changed);
     const UseResult result = this->use();
     if (changed) {
       CHECK(result.refused);
-    } else if (!result.refused) {
-      // An unchanged draw must still return exactly what was stored.
+    } else {
+      CHECK_FALSE(result.refused);
       CHECK(result.recovered == kPayload);
     }
-
     this->restore();
+  };
+
+  SECTION("replacements that cancel leave an authentic record") {
+    std::vector<unsigned char> mutated = this->original;
+    mutated[kMagicLen] ^= 0x01;
+    REQUIRE(mutated != this->original);
+    mutated[kMagicLen] = this->original[kMagicLen];
+    checkMutation(mutated);
+  }
+
+  SECTION("seeded random replacements") {
+    // The draws are replayable, but the record's salt, nonce and ciphertext
+    // vary between fixtures, so whether replacements cancel can also vary.
+    // NOLINTNEXTLINE(bugprone-random-generator-seed)
+    std::mt19937 rng(0xA1F1E);
+    std::uniform_int_distribution<size_t> pick(0, this->original.size() - 1);
+    std::uniform_int_distribution<int> byteValue(0, 255);
+    std::uniform_int_distribution<size_t> mutationCount(1, 4);
+
+    for (int iteration = 0; iteration < 400; ++iteration) {
+      CAPTURE(iteration);
+      std::vector<unsigned char> mutated = this->original;
+      const size_t mutations = mutationCount(rng);
+      for (size_t m = 0; m < mutations; ++m) {
+        const size_t index = pick(rng);
+        mutated[index] = static_cast<unsigned char>(byteValue(rng));
+      }
+      checkMutation(mutated);
+    }
   }
 }
 
