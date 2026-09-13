@@ -50,6 +50,12 @@ static void writeBytes(const std::filesystem::path &path,
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   out.write(reinterpret_cast<const char *>(data.data()),
             static_cast<std::streamsize>(data.size()));
+  out.flush();
+  // Say so here if the mutation never reached the disk. Without this, a failed
+  // write leaves the untouched record in place, the vault reads it back
+  // happily, and the case fails as though authentication had accepted a
+  // corrupted record -- pointing at the crypto instead of at the filesystem.
+  REQUIRE(out.good());
 }
 
 /// What one attempt to read a record produced: whether the vault refused it,
